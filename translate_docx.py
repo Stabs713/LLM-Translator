@@ -52,7 +52,7 @@ def translate_docx(input_path, output_path):
         # Переводим
         chunks = chunk_text_by_sentences_safe(clean_text)
         translated = " ".join(
-            translate_chunk(chunk, file_type="docx") 
+            translate_chunk(chunk) 
             for chunk in chunks if chunk.strip()
         )
 
