@@ -1,41 +1,13 @@
+# common.py
 import os
+import re
 import requests
 from tqdm import tqdm
 from dotenv import load_dotenv
-import re
 
 # Настройки
 INPUT_DIR = "inputs"
 OUTPUT_DIR = "outputs"
-
-# Защищённые макросы — НЕ переводить
-PROTECTED_MACROS = {
-    'cite', 'ref', 'label', 'eqref', 'footnote', 'url', 'href', 'includegraphics',
-    'input', 'include', 'usepackage', 'documentclass', 'bibitem', 'index',
-    'begin', 'end', 'hline', 'cline', 'multicolumn', 'multirow'
-}
-
-# Макросы, чьи аргументы МОЖНО переводить
-TRANSLATABLE_MACROS = {
-    'section', 'subsection', 'subsubsection', 'chapter', 'part',
-    'caption', 'title', 'author', 'date', 'abstract',
-    'textbf', 'textit', 'emph', 'underline', 'item', 'texttt'
-}
-
-# Защищённые окружения (НЕ переводим)
-PROTECTED_ENVIRONMENTS = {
-    'equation', 'align', 'gather', 'multline', 'eqnarray',
-    'verbatim', 'lstlisting', 'code', 'minted', 'displaymath', 'math',
-    'figure'
-}
-
-# Транслируемые окружения (переводим содержимое)
-TRANSLATABLE_ENVIRONMENTS = {
-    'tabular',
-    'table',
-    'itemize',
-    'enumerate'
-}
 
 # Глобальные переменные
 PROXY_API_URL = None
@@ -59,13 +31,11 @@ def get_current_model():
 
 def chunk_text_by_sentences_safe(text, max_tokens=1200):
     """
-    Разбивает текст на чанки, но НИКОГДА не обрывает предложение.
-    Если предложение не помещается в текущий чанк — оно идёт в следующий.
+    Разбивает текст на чанки по предложениям, не обрывая предложение.
     """
     if not text.strip():
         return [text]
 
-    # Разделяем на предложения (с учётом . ! ? и возможных сокращений)
     sentences = re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z])', text.strip())
     if not sentences:
         return [text]
@@ -77,21 +47,17 @@ def chunk_text_by_sentences_safe(text, max_tokens=1200):
     for sent in sentences:
         tokens = len(sent) // 4  # грубая оценка
 
-        # Если текущий чанк пуст — берём предложение даже если оно длинное
         if not current_chunk:
             current_chunk = [sent]
             current_len = tokens
-        # Если предложение помещается — добавляем
         elif current_len + tokens <= max_tokens:
             current_chunk.append(sent)
             current_len += tokens
-        # Если НЕ помещается — закрываем чанк БЕЗ этого предложения
         else:
             chunks.append(" ".join(current_chunk))
-            current_chunk = [sent]  # начинаем новый чанк с этого предложения
+            current_chunk = [sent]
             current_len = tokens
 
-    # Добавляем последний чанк
     if current_chunk:
         chunks.append(" ".join(current_chunk))
 
@@ -99,9 +65,11 @@ def chunk_text_by_sentences_safe(text, max_tokens=1200):
 
 def translate_chunk(text, retries=3):
     prompt = f"""Переведи ТОЛЬКО текст с английского на русский. Сохрани:
-- все формулы, команды LaTeX (\\section, \\texttt, \\url, \\begin{{...}}, и т.д.) без изменений,
-- исходную структуру и пунктуацию.
-НЕ ДОБАВЛЯЙ ничего от себя: никаких комментариев, пояснений или фраз вроде "Вы не предоставили текст".
+- Все плейсхолдеры вида __PH_0__, __PH_1__ и т.д. БЕЗ ИЗМЕНЕНИЙ.
+- Не удаляй, не добавляй, не меняй их.
+- Переводи только обычный текст между ними.
+- Сохрани исходную структуру и пунктуацию.
+- НЕ ДОБАВЛЯЙ комментариев, пояснений или фраз вроде "Вот перевод:".
 
 Текст:
 {text}"""

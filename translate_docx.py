@@ -1,3 +1,4 @@
+#translate_docx.py
 import re
 import sys
 from docx import Document

@@ -1,118 +1,237 @@
+# translate_tex.py
 import os
+import re
 import zipfile
-import sys
+import tempfile
+import shutil
+import subprocess
 from tqdm import tqdm
-
-# Импорты для LaTeX
-try:
-    from pylatexenc.latexwalker import (
-        LatexWalker,
-        LatexMacroNode,
-        LatexCharsNode,
-        LatexGroupNode,
-        LatexEnvironmentNode
-    )
-except ImportError:
-    LatexWalker = None
-
 from common import (
-    PROTECTED_MACROS,
-    TRANSLATABLE_MACROS,
-    PROTECTED_ENVIRONMENTS,
-    TRANSLATABLE_ENVIRONMENTS,
-    translate_chunk
+    translate_chunk,
+    chunk_text_by_sentences_safe,
+    OUTPUT_DIR
 )
 
-# Глобальные списки для сбора текста
-translatable_texts = []
-text_spans = []
+# === Безопасный перевод таблиц ===
 
-def translate_latex_text(latex_content, max_tokens=1200):
-    global translatable_texts, text_spans
-    if LatexWalker is None:
-        print("❌ Установите pylatexenc: pip install pylatexenc")
-        sys.exit(1)
+def translate_tabular_content(content):
+    if not content.strip():
+        return content
+    lines = content.split('\\\\')
+    translated_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            translated_lines.append("")
+            continue
+        if stripped.startswith(r'\hline') or stripped.startswith(r'\cline'):
+            translated_lines.append(line)
+            continue
+        cells = line.split('&')
+        translated_cells = []
+        for cell in cells:
+            cell = cell.strip()
+            if not cell:
+                translated_cells.append("")
+                continue
+            if (cell.startswith(r'\multicolumn') or
+                cell.startswith(r'\multirow') or
+                cell.startswith(r'\cline') or
+                cell.startswith(r'\hline')):
+                translated_cells.append(cell)
+                continue
+            translated_cells.append(translate_chunk(cell))
+        translated_lines.append(" & ".join(translated_cells))
+    return " \\\\ \n".join(translated_lines)
 
-    translatable_texts = []
-    text_spans = []
+# === Основная функция перевода ===
 
-    walker = LatexWalker(latex_content)
-    nodelist, _, _ = walker.get_latex_nodes(pos=0)
+def translate_latex_text(latex_content):
+    # === Шаг 1: Перевод аргументов макросов, которые ДОЛЖНЫ переводиться ===
+    TRANSLATABLE_MACROS = ['section', 'subsection', 'subsubsection', 'caption', 'title', 'author', 'abstract']
+    for macro in TRANSLATABLE_MACROS:
+        def repl(m):
+            inner = m.group(1)
+            translated = translate_chunk(inner)
+            return f"\\{macro}{{{translated}}}"
+        latex_content = re.sub(rf'\\{macro}\{{(.*?)\}}', repl, latex_content, flags=re.DOTALL)
 
-    def collect_text(node, inside_math=False, inside_protected=False):
-        if isinstance(node, LatexCharsNode):
-            text = node.chars
-            if text.strip() and not inside_math and not inside_protected:
-                start_pos = node.pos
-                end_pos = start_pos + len(text)
-                translatable_texts.append(text)
-                text_spans.append((start_pos, end_pos))
-        elif isinstance(node, LatexMacroNode):
-            macro_name = node.macroname or ""
-            is_protected = macro_name in PROTECTED_MACROS
-            if not is_protected and macro_name in TRANSLATABLE_MACROS:
-                if node.nodeargd:
-                    for arg in node.nodeargd.argnlist:
-                        if arg is not None:
-                            collect_text(arg, inside_math=inside_math, inside_protected=inside_protected)
-        elif isinstance(node, LatexEnvironmentNode):
-            env_name = node.envname or ""
-            math_env = env_name in {'equation', 'align', 'gather', 'displaymath', 'math'}
-            # Явно обрабатываем транслируемые окружения
-            if env_name in TRANSLATABLE_ENVIRONMENTS and not math_env:
-                for child in node.nodelist:
-                    collect_text(child, inside_math=math_env, inside_protected=False)
-            # Обычные окружения — если не защищены
-            elif env_name not in PROTECTED_ENVIRONMENTS and not math_env:
-                for child in node.nodelist:
-                    collect_text(child, inside_math=math_env, inside_protected=False)
-        elif isinstance(node, LatexGroupNode):
-            for child in node.nodelist:
-                collect_text(child, inside_math=inside_math, inside_protected=inside_protected)
+    # === Шаг 2: Маскировка всего, что НЕЛЬЗЯ переводить ===
+    placeholders = []
+    def store_and_mask(match):
+        placeholders.append(match.group(0))
+        return f"__PH_{len(placeholders)-1}__"
 
-    for node in nodelist:
-        collect_text(node)
+    # Критически важные команды
+    latex_content = re.sub(r'\\documentclass(\[[^\]]*\])?\{[^}]*\}', store_and_mask, latex_content)
+    latex_content = re.sub(r'\\(usepackage|bibliographystyle|RequirePackage)(\[[^\]]*\])?\{[^}]*\}', store_and_mask, latex_content)
 
-    # Переводим текст БЕЗ чанкования (чтобы не ломать короткие фразы в таблицах)
-    translated_texts = []
-    for text in tqdm(translatable_texts, desc="Перевод LaTeX"):
-        # Передаём целиком — без chunk_text_by_paragraphs
-        translated = translate_chunk(text)
-        translated_texts.append(translated)
+    # Защищённые окружения
+    PROTECTED_ENVS = [
+        'equation', 'align', 'gather', 'multline', 'eqnarray',
+        'verbatim', 'lstlisting', 'minted', 'displaymath', 'math',
+        'code', 'algorithm', 'algorithmic', 'figure'
+    ]
+    for env in PROTECTED_ENVS:
+        latex_content = re.sub(rf'\\begin{{{env}}}.*?\\end{{{env}}}', store_and_mask, latex_content, flags=re.DOTALL)
 
-    # Заменяем в исходной строке
-    result = list(latex_content)
-    for i in range(len(text_spans) - 1, -1, -1):
-        start, end = text_spans[i]
-        result[start:end] = translated_texts[i]
+    # Формулы
+    latex_content = re.sub(r'\$\$(.*?)\$\$', store_and_mask, latex_content, flags=re.DOTALL)
+    latex_content = re.sub(r'\$(.*?)\$', store_and_mask, latex_content, flags=re.DOTALL)
+    latex_content = re.sub(r'\\\((.*?)\\\)', store_and_mask, latex_content, flags=re.DOTALL)
+    latex_content = re.sub(r'\\\[', store_and_mask, latex_content)
+    latex_content = re.sub(r'\\\]', store_and_mask, latex_content)
 
-    return ''.join(result)
+    # Комментарии и опции
+    latex_content = re.sub(r'(?<!\\)%.*', store_and_mask, latex_content)
+    latex_content = re.sub(r'\[[^\]]*\]', store_and_mask, latex_content)
 
-# --- Извлечение из ZIP ---
-def extract_tex_from_zip(zip_path):
+    # Все остальные команды
+    latex_content = re.sub(r'\\([a-zA-Z]+)(\{[^{}]*\})?', store_and_mask, latex_content)
+
+    # === Шаг 3: Обработка tabular отдельно (не маскируем целиком!) ===
+    def replace_tabular(match):
+        full = match.group(0)
+        m = re.search(r'\\begin\{tabular\}(\{[^}]*\})(.*?)\\end\{tabular\}', full, re.DOTALL)
+        if m:
+            spec = m.group(1)
+            body = m.group(2)
+            return f"\\begin{{tabular}}{spec}{translate_tabular_content(body)}\\end{{tabular}}"
+        return full
+    latex_content = re.sub(r'\\begin\{tabular\}\{[^}]*\}.*?\\end\{tabular\}', replace_tabular, latex_content, flags=re.DOTALL)
+
+    # === Шаг 4: Перевод оставшегося текста с прогресс-баром ===
+    chunks = chunk_text_by_sentences_safe(latex_content, max_tokens=1200)
+    translated_chunks = []
+    for chunk in tqdm(chunks, desc="Перевод LaTeX"):
+        if chunk.strip():
+            translated_chunks.append(translate_chunk(chunk))
+        else:
+            translated_chunks.append(chunk)
+    translated = "".join(translated_chunks)
+
+    # === Шаг 5: Восстановление ===
+    for i in range(len(placeholders) - 1, -1, -1):
+        translated = translated.replace(f"__PH_{i}__", placeholders[i])
+
+    return translated
+
+# === Остальные функции (без изменений) ===
+
+def get_all_tex_files_in_zip(zip_path):
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        tex_files = [f for f in zip_ref.namelist() if f.lower().endswith('.tex')]
-        if not tex_files:
-            raise ValueError("В архиве нет .tex файлов.")
-        tex_file = tex_files[0]
-        content = zip_ref.read(tex_file).decode('utf-8')
-        return os.path.basename(tex_file), content
+        return [f for f in zip_ref.namelist() if f.lower().endswith('.tex')]
 
-# --- Добавление поддержки русского ---
+def select_tex_files_for_translation(tex_files_list):
+    print(f"\n📌 Найдено {len(tex_files_list)} .tex файлов:")
+    for i, f in enumerate(tex_files_list, 1):
+        print(f"  {i}. {f}")
+    print("\nКакие файлы перевести?")
+    print("1. Только один файл")
+    print("2. Несколько файлов")
+    print("3. Все файлы")
+    while True:
+        try:
+            choice = int(input("Выберите действие (1/2/3): ").strip())
+            if choice == 1:
+                idx = int(input("Введите номер файла: ")) - 1
+                if 0 <= idx < len(tex_files_list):
+                    return [tex_files_list[idx]]
+                else:
+                    print("❌ Неверный номер.")
+            elif choice == 2:
+                indices = input("Введите номера файлов через пробел: ").strip().split()
+                selected = []
+                for s in indices:
+                    try:
+                        idx = int(s) - 1
+                        if 0 <= idx < len(tex_files_list):
+                            selected.append(tex_files_list[idx])
+                        else:
+                            print(f"⚠️ Номер {s} вне диапазона.")
+                    except ValueError:
+                        print(f"⚠️ «{s}» — не число.")
+                if selected:
+                    return selected
+                else:
+                    print("❌ Не выбрано ни одного файла.")
+            elif choice == 3:
+                return tex_files_list[:]
+            else:
+                print("❌ Выберите 1, 2 или 3.")
+        except ValueError:
+            print("❌ Введите число.")
+
+def repack_zip_with_translated_tex(original_zip_path, translated_files, output_zip_path):
+    with zipfile.ZipFile(original_zip_path, 'r') as zip_in:
+        with zipfile.ZipFile(output_zip_path, 'w') as zip_out:
+            for item in zip_in.infolist():
+                if item.filename in translated_files:
+                    zip_out.writestr(item, translated_files[item.filename].encode('utf-8'))
+                else:
+                    zip_out.writestr(item, zip_in.read(item.filename))
+
+def find_main_tex_in_dir(directory):
+    for root, _, files in os.walk(directory):
+        for f in files:
+            if f.lower().endswith('.tex'):
+                path = os.path.join(root, f)
+                try:
+                    with open(path, 'r', encoding='utf-8') as file:
+                        if r'\documentclass' in file.read():
+                            return os.path.relpath(path, directory)
+                except:
+                    continue
+    return None
+
+def compile_zip_to_pdf(zip_path, output_pdf_path=None):
+    if not output_pdf_path:
+        base = os.path.splitext(os.path.basename(zip_path))[0]
+        output_pdf_path = os.path.join(OUTPUT_DIR, f"{base}_translated.pdf")
+
+    try:
+        subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=10)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        print("ℹ️  Docker не запущен. Запустите Docker Desktop.")
+        return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(tmpdir)
+
+        main_tex = find_main_tex_in_dir(tmpdir)
+        if not main_tex:
+            print("⚠️ Не найден файл с \\documentclass.")
+            return None
+
+        print(f"📄 Компиляция: {main_tex}")
+        main_tex_posix = main_tex.replace("\\", "/")
+
+        try:
+            result = subprocess.run([
+                "docker", "run", "--rm",
+                "-v", f"{tmpdir}:/work",
+                "-w", "/work",
+                "texlive/texlive",
+                "latexmk", "-xelatex", "-interaction=nonstopmode", "-halt-on-error", main_tex_posix
+            ], capture_output=False, text=True, timeout=180)
+
+            if result.returncode == 0:
+                generated_pdf = os.path.join(tmpdir, os.path.splitext(main_tex)[0] + ".pdf")
+                if os.path.exists(generated_pdf):
+                    shutil.copy(generated_pdf, output_pdf_path)
+                    print(f"✅ PDF создан: {output_pdf_path}")
+                    return output_pdf_path
+        except Exception as e:
+            print(f"💥 Ошибка: {e}")
+    return None
+
 def add_russian_preamble(latex_content):
     if r"\documentclass" not in latex_content:
         return latex_content
 
-    lines = []
-    for line in latex_content.splitlines():
-        if r"\usepackage[" in line and "babel" in line:
-            continue
-        elif r"\usepackage{babel}" in line:
-            continue
-        else:
-            lines.append(line)
-
-    content_without_babel = "\n".join(lines)
+    lines = [line for line in latex_content.splitlines()
+             if not (r"\usepackage[" in line and "babel" in line) and r"\usepackage{babel}" not in line]
 
     new_preamble = [
         "% Поддержка русского языка (автоматически добавлено)",
@@ -125,17 +244,12 @@ def add_russian_preamble(latex_content):
         ""
     ]
 
-    if r"\documentclass" in content_without_babel:
-        lines = content_without_babel.splitlines()
-        new_lines = []
-        inserted = False
-        for line in lines:
-            if r"\documentclass" in line and not inserted:
-                new_lines.append(line)
-                new_lines.extend(new_preamble)
-                inserted = True
-            else:
-                new_lines.append(line)
-        return "\n".join(new_lines)
-    else:
-        return "\n".join(new_preamble) + "\n" + content_without_babel
+    result_lines = []
+    inserted = False
+    for line in lines:
+        result_lines.append(line)
+        if r"\documentclass" in line and not inserted:
+            result_lines.extend(new_preamble)
+            inserted = True
+
+    return "\n".join(result_lines)
