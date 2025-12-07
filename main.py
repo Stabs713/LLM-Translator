@@ -1,4 +1,3 @@
-# main.py
 import os
 import sys
 
@@ -13,18 +12,9 @@ from common import (
     select_main_action,
     select_translation_model
 )
-
-from translate_tex import (
-    translate_latex_text,
-    get_all_tex_files_in_zip,
-    select_tex_files_for_translation,
-    repack_zip_with_translated_tex,
-    compile_zip_to_pdf,
-    add_russian_preamble
-)
-
+from translate_tex import translate_latex_text, add_russian_preamble, process_zip_for_translation, restore_bibliography_commands
 from translate_docx import translate_docx
-from pdf_converter import compile_tex_to_pdf_via_docker
+from pdf_converter import compile_tex_to_pdf_via_docker, compile_zip_to_pdf_via_docker
 
 def main():
     print(" LLM-Translator: перевод .tex / .docx / .zip")
@@ -39,7 +29,10 @@ def main():
     action = select_main_action()
 
     if action == "translate":
+        # Выбор модели
         model_name = select_translation_model()
+        
+        # Проверка подключения к выбранной модели
         if not test_model_connection(model_name):
             print("❌ Не удалось подключиться к модели. Проверьте ключ и URL.")
             sys.exit(1)
@@ -56,7 +49,7 @@ def main():
             print(f"📁 В папке '{INPUT_DIR}' нет .tex файлов для компиляции.")
             sys.exit(1)
         print(f"\n📁 Доступные .tex файлы для компиляции:")
-        model_name = None
+        model_name = None  # не используется
 
     for i, filename in enumerate(available, 1):
         print(f"  {i}. {filename}")
@@ -69,46 +62,35 @@ def main():
 
     try:
         if action == "translate":
+            # Передаём выбранную модель в функции перевода
             from common import set_current_model
             set_current_model(model_name)
 
             if ext == '.zip':
-                print("\n📦 Извлечение всех .tex файлов из архива...")
-                tex_files = get_all_tex_files_in_zip(input_path)
-                if not tex_files:
-                    print("❌ В архиве нет .tex файлов.")
-                    sys.exit(1)
-
-                selected_tex_files = select_tex_files_for_translation(tex_files)
-
-                translated_contents = {}
-                for tex_file in selected_tex_files:
-                    print(f"\n📝 Перевод: {tex_file}")
-                    import zipfile
-                    with zipfile.ZipFile(input_path, 'r') as zip_ref:
-                        content = zip_ref.read(tex_file).decode('utf-8')
-                    translated = translate_latex_text(content)
-                    translated = add_russian_preamble(translated)
-                    translated_contents[tex_file] = translated
-
-                base_name = os.path.splitext(filename)[0]
-                new_zip_path = os.path.join(OUTPUT_DIR, f"{base_name}_translated.zip")
-                repack_zip_with_translated_tex(input_path, translated_contents, new_zip_path)
-                print(f"✅ Новый архив создан: {new_zip_path}")
-
+                print("\n📦 Обработка архива...")
+                output_zip, main_tex_name = process_zip_for_translation(input_path, OUTPUT_DIR)
+                print(f"✅ Перевод завершён! Архив: {output_zip}")
                 if input("Скомпилировать в PDF? (y/n): ").strip().lower() == 'y':
-                    pdf_path = compile_zip_to_pdf(new_zip_path)
-                    if pdf_path:
-                        print(f"📄 PDF доступен: {pdf_path}")
-                    else:
-                        print("❌ Не удалось создать PDF.")
+                    compile_zip_to_pdf_via_docker(output_zip, main_tex_name)
 
             elif ext == '.tex':
                 with open(input_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                    original_content = f.read()
                 output_tex = os.path.join(OUTPUT_DIR, f"{base}_translated.tex")
-                translated = translate_latex_text(content)
-                translated = add_russian_preamble(translated)
+                content_with_preamble = add_russian_preamble(original_content)
+                translated = translate_latex_text(content_with_preamble)
+                translated = restore_bibliography_commands(original_content, translated)
+                # Восстанавливаем \documentclass из оригинала
+                import re
+                docclass_match = re.search(r'\\documentclass(?:\[[^\]]*\])?\{[^\}]+\}', original_content)
+                if docclass_match:
+                    orig_docclass = docclass_match.group(0)
+                    translated = re.sub(
+                        r'\\documentclass(?:\[[^\]]*\])?\{[^\}]+\}',
+                        lambda m: orig_docclass,
+                        translated,
+                        count=1
+                    )
                 with open(output_tex, 'w', encoding='utf-8') as f:
                     f.write(translated)
                 print(f"\n✅ Перевод .tex завершён! Результат: {output_tex}")
@@ -131,8 +113,6 @@ def main():
         sys.exit(1)
     except Exception as e:
         print(f"\n💥 Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":

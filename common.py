@@ -1,13 +1,93 @@
-# common.py
 import os
-import re
 import requests
 from tqdm import tqdm
 from dotenv import load_dotenv
+import re
 
 # Настройки
 INPUT_DIR = "inputs"
 OUTPUT_DIR = "outputs"
+
+# Защищённые макросы — НЕ переводить
+PROTECTED_MACROS = {
+    # Базовые команды документа
+    'documentclass', 'usepackage', 'RequirePackage',
+    
+    # Метки и ссылки
+    'label', 'ref', 'eqref', 'pageref', 'autoref',
+    
+    # Библиография
+    'cite', 'bibitem', 'bibliographystyle', 'bibliography', 'nocite',
+    
+    # Графика и файлы
+    'includegraphics', 'input', 'include', 'subfile',
+    
+    # Гиперссылки
+    'url', 'href', 'footnote', 'footnotemark', 'footnotetext',
+    
+    # Таблицы и матрицы
+    'hline', 'cline', 'multicolumn', 'multirow', 'cellcolor',
+    
+    # Оформление
+    'pagestyle', 'pagenumbering', 'thispagestyle',
+    
+    # Математика (команды, а не содержимое)
+    'newcommand', 'renewcommand', 'DeclareMathOperator',
+    
+    # Индекс и глоссарии
+    'index', 'gls', 'glsadd', 'printglossary',
+    
+    # Прочие технические
+    'begin', 'end',
+    'addbibresource',
+    'usetikzlibrary', 'usepgflibrary',
+    'hypersetup',
+    'def', 'let',
+}
+
+# Макросы, чьи аргументы МОЖНО переводить
+TRANSLATABLE_MACROS = {
+    # Структура документа
+    'section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph',
+    'chapter', 'part', 'title', 'author', 'date', 'affil',
+    
+    # Оформление текста
+    'caption', 'shortcaption',
+    'textbf', 'textit', 'emph', 'underline', 'texttt', 'textsf', 'textrm',
+    'textsc', 'textsl', 'textsuperscript', 'textsubscript',
+    
+    # Списки и абзацы
+    'item', 'footnote',
+    
+    # Абстракт и блоки
+    'abstract', 'keywords',
+    
+    # Теоремы и определения
+    'theorem', 'lemma', 'proposition', 'definition', 'corollary',
+}
+
+# Защищённые окружения (НЕ переводим)
+PROTECTED_ENVIRONMENTS = {
+    # Математика
+    'equation', 'equation*', 'align', 'align*', 'gather', 'gather*',
+    'multline', 'multline*', 'eqnarray', 'eqnarray*', 'displaymath',
+    'math', '$',
+    
+    # Код и верbatim
+    'verbatim', 'lstlisting', 'minted', 'code', 'Verbatim',
+    
+    # Прочие
+    'tikzpicture', 'asy', 'pspicture',
+    'tabular', 'tabularx', 'tabulary', 'longtable',
+}
+
+# Транслируемые окружения (переводим содержимое)
+TRANSLATABLE_ENVIRONMENTS = {
+    'table', 'figure',
+    'center', 'flushleft', 'flushright',
+    'quote', 'quotation', 'verse',
+    'itemize', 'enumerate', 'description',
+}
 
 # Глобальные переменные
 PROXY_API_URL = None
@@ -30,9 +110,6 @@ def get_current_model():
     return CURRENT_MODEL
 
 def chunk_text_by_sentences_safe(text, max_tokens=1200):
-    """
-    Разбивает текст на чанки по предложениям, не обрывая предложение.
-    """
     if not text.strip():
         return [text]
 
@@ -45,7 +122,7 @@ def chunk_text_by_sentences_safe(text, max_tokens=1200):
     current_len = 0
 
     for sent in sentences:
-        tokens = len(sent) // 4  # грубая оценка
+        tokens = len(sent) // 4
 
         if not current_chunk:
             current_chunk = [sent]
@@ -65,11 +142,9 @@ def chunk_text_by_sentences_safe(text, max_tokens=1200):
 
 def translate_chunk(text, retries=3):
     prompt = f"""Переведи ТОЛЬКО текст с английского на русский. Сохрани:
-- Все плейсхолдеры вида __PH_0__, __PH_1__ и т.д. БЕЗ ИЗМЕНЕНИЙ.
-- Не удаляй, не добавляй, не меняй их.
-- Переводи только обычный текст между ними.
-- Сохрани исходную структуру и пунктуацию.
-- НЕ ДОБАВЛЯЙ комментариев, пояснений или фраз вроде "Вот перевод:".
+- все формулы, команды LaTeX (\\section, \\texttt, \\url, \\begin{{...}}, и т.д.) без изменений,
+- исходную структуру и пунктуацию.
+НЕ ДОБАВЛЯЙ ничего от себя: никаких комментариев, пояснений или фраз вроде "Вы не предоставили текст".
 
 Текст:
 {text}"""
