@@ -1,3 +1,4 @@
+# translate_tex.py
 import os
 import zipfile
 import sys
@@ -6,6 +7,82 @@ import re
 
 from common import translate_chunk
 
+# Файлы, которые НЕ нужно переводить
+EXCLUDE_FILES = {
+    'journalnames.tex',
+    'mdpi.cls',
+    'Definitions.tex',
+    'reference.bib',
+    'bibliography.bib',
+}
+
+# Расширения файлов, которые НЕ переводим
+EXCLUDE_EXTENSIONS = {
+    '.bib',  # Библиография
+    '.bst',  # Стили библиографии
+    '.cls',  # Классы документов
+    '.sty',  # Пакеты стилей
+}
+
+def should_translate_file(filename):
+    """Проверяет, нужно ли переводить файл"""
+    basename = os.path.basename(filename).lower()
+    
+    # Проверяем по имени файла
+    if basename in {name.lower() for name in EXCLUDE_FILES}:
+        return False
+    
+    # Проверяем по расширению
+    _, ext = os.path.splitext(basename)
+    if ext.lower() in EXCLUDE_EXTENSIONS:
+        return False
+    
+    return True
+
+def fix_lualatex_compatibility(content):
+    """Добавляет фиксы для совместимости с LuaLaTeX (для MDPI)"""
+    
+    # Проверяем, есть ли \documentclass
+    if '\\documentclass' not in content:
+        return content
+    
+    # Проверяем, не добавлен ли уже фикс
+    if 'LuaLaTeX Compatibility Fix' in content:
+        return content
+    
+    # Находим позицию после \documentclass{...}
+    match = re.search(r'(\\documentclass(?:\[[^\]]*\])?\{[^}]+\})', content)
+    if match:
+        pos = match.end()
+        
+        # Добавляем фикс для pdffilesize и других PDF примитивов
+        fix = """
+% === LuaLaTeX Compatibility Fix ===
+\\RequirePackage{iftex}
+\\ifluatex
+  % Эмуляция PDF примитивов для старых пакетов
+  \\protected\\def\\pdffilesize#1{%
+    \\directlua{
+      local file = io.open("#1", "rb")
+      if file then
+        local size = file:seek("end")
+        file:close()
+        tex.write(size)
+      else
+        tex.write(0)
+      end
+    }%
+  }
+  % Другие PDF примитивы (если нужно)
+  \\let\\pdfpagewidth\\pagewidth
+  \\let\\pdfpageheight\\pageheight
+\\fi
+% === End Fix ===
+
+"""
+        content = content[:pos] + fix + content[pos:]
+    
+    return content
 
 def translate_latex_text(latex_content, max_chunk_size=2000):
     """
@@ -42,7 +119,6 @@ def translate_latex_text(latex_content, max_chunk_size=2000):
     # Шаг 4: Собираем документ обратно
     return translated_preamble + begin_doc + translated_body + postamble
 
-
 def translate_preamble(preamble):
     """Переводит только \title{} в преамбуле, автора оставляет"""
     result = preamble
@@ -68,10 +144,7 @@ def translate_preamble(preamble):
 
     result = re.sub(r'\\title\{([^}]+)\}', translate_title, result)
 
-    # Автора НЕ переводим (обычно имена собственные)
-
     return result
-
 
 def translate_body(body, max_chunk_size=2000):
     """Переводит тело документа с защитой математики и технических команд"""
@@ -85,7 +158,6 @@ def translate_body(body, max_chunk_size=2000):
     text = body
 
     # Защищаем математику
-    # Display math
     text = re.sub(r'\\\[.*?\\\]', protect_block, text, flags=re.DOTALL)
     text = re.sub(r'\\begin\{equation\*?\}.*?\\end\{equation\*?\}', protect_block, text, flags=re.DOTALL)
     text = re.sub(r'\\begin\{align\*?\}.*?\\end\{align\*?\}', protect_block, text, flags=re.DOTALL)
@@ -102,7 +174,11 @@ def translate_body(body, max_chunk_size=2000):
         pattern = rf'\\begin\{{{env}\*?\}}.*?\\end\{{{env}\*?\}}'
         text = re.sub(pattern, protect_block, text, flags=re.DOTALL)
 
-    # Технические команды (сами команды, не аргументы)
+    # КРИТИЧНО: Защищаем \input и \include (LaTeX не работает с кириллицей в путях!)
+    text = re.sub(r'(\\input\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\include\{[^}]*\})', protect_block, text)
+
+    # Технические команды
     text = re.sub(r'(\\label\{[^}]*\})', protect_block, text)
     text = re.sub(r'(\\ref\{[^}]*\})', protect_block, text)
     text = re.sub(r'(\\eqref\{[^}]*\})', protect_block, text)
@@ -141,7 +217,6 @@ def translate_body(body, max_chunk_size=2000):
 
         # Переводим
         if len(para) > max_chunk_size:
-            # Разбиваем на предложения
             sentences = re.split(r'(?<=[.!?])\s+', para)
             chunks = []
             current = []
@@ -173,7 +248,6 @@ def translate_body(body, max_chunk_size=2000):
 
     return result
 
-
 def restore_bibliography_commands(original_content, translated_content):
     """Восстанавливает библиографические команды из оригинала"""
     orig_style = re.search(r'\\bibliographystyle\{([^}]+)\}', original_content)
@@ -198,7 +272,6 @@ def restore_bibliography_commands(original_content, translated_content):
 
     return translated_content
 
-
 def process_zip_for_translation(zip_path, output_dir):
     """Обрабатывает ZIP-архив с LaTeX файлами"""
     import tempfile
@@ -209,10 +282,18 @@ def process_zip_for_translation(zip_path, output_dir):
 
         tex_files = []
         main_tex = None
+        is_mdpi = False  # Флаг для определения MDPI
+        
         for root, _, files in os.walk(tmp_extract_dir):
             for f in files:
                 if f.lower().endswith('.tex'):
                     full_path = os.path.join(root, f)
+                    
+                    # ПРОВЕРЯЕМ, НУЖНО ЛИ ПЕРЕВОДИТЬ ФАЙЛ
+                    if not should_translate_file(f):
+                        print(f"⏭️  Пропуск файла (технический): {f}")
+                        continue
+                    
                     tex_files.append(full_path)
                     if main_tex is None:
                         try:
@@ -220,16 +301,43 @@ def process_zip_for_translation(zip_path, output_dir):
                                 content = fp.read()
                                 if r'\begin{document}' in content:
                                     main_tex = full_path
+                                    # Проверяем, это MDPI?
+                                    if 'mdpi' in content.lower() and '\\documentclass' in content:
+                                        is_mdpi = True
                         except:
                             pass
 
         if not tex_files:
-            raise ValueError("В архиве нет .tex файлов.")
+            # Проверяем, есть ли вообще .tex файлы
+            all_tex = []
+            for root, _, files in os.walk(tmp_extract_dir):
+                for f in files:
+                    if f.lower().endswith('.tex'):
+                        all_tex.append(os.path.join(root, f))
+            
+            if not all_tex:
+                raise ValueError("В архиве нет .tex файлов.")
+            else:
+                print("⚠️  Все .tex файлы были исключены (технические файлы).")
+                print("ℹ️  Создаём архив без изменений...")
+                # Находим главный файл для компиляции
+                for tf in all_tex:
+                    try:
+                        with open(tf, 'r', encoding='utf-8') as fp:
+                            if r'\begin{document}' in fp.read():
+                                main_tex = tf
+                                break
+                    except:
+                        pass
+                
+                if not main_tex:
+                    main_tex = all_tex[0]
 
-        if main_tex is None:
+        if main_tex is None and tex_files:
             main_tex = tex_files[0]
             print("⚠️ Не найден \\begin{document}. Используем первый .tex как главный.")
 
+        # Переводим только отобранные файлы
         for tex_path in tex_files:
             print(f"\n📄 Перевод файла: {os.path.basename(tex_path)}")
             with open(tex_path, 'r', encoding='utf-8') as f:
@@ -249,6 +357,11 @@ def process_zip_for_translation(zip_path, output_dir):
                     translated,
                     count=1
                 )
+            
+            # ПРИМЕНЯЕМ ФИКС ДЛЯ MDPI
+            if is_mdpi and tex_path == main_tex:
+                translated = fix_lualatex_compatibility(translated)
+                print("  ✓ Применён фикс совместимости LuaLaTeX для MDPI")
 
             with open(tex_path, 'w', encoding='utf-8') as f:
                 f.write(translated)
@@ -266,9 +379,8 @@ def process_zip_for_translation(zip_path, output_dir):
         main_tex_rel = os.path.relpath(main_tex, tmp_extract_dir)
         return output_zip, main_tex_rel
 
-
 def add_russian_preamble(latex_content):
-    """Добавляет поддержку русского языка в преамбулу"""
+    """Добавляет поддержку русского языка в преамбулу с учётом LuaLaTeX для MDPI"""
     if r"\documentclass" not in latex_content:
         return latex_content
 
@@ -284,16 +396,34 @@ def add_russian_preamble(latex_content):
 
     content_without_babel = "\n".join(lines)
 
-    new_preamble = [
-        "% Поддержка русского языка (автоматически добавлено)",
-        r"\usepackage{fontspec}",
-        r"\usepackage[russian]{babel}",
-        r"\usepackage{amsmath}",
-        r"\setmainfont{DejaVu Serif}",
-        r"\setsansfont{DejaVu Sans}",
-        r"\setmonofont{DejaVu Sans Mono}",
-        ""
-    ]
+    # Проверяем, используется ли класс mdpi
+    is_mdpi = r"\documentclass" in content_without_babel and "mdpi" in content_without_babel
+
+    if is_mdpi:
+        # Для MDPI используем настройки для LuaLaTeX
+        new_preamble = [
+            "% Поддержка русского языка (автоматически добавлено для LuaLaTeX)",
+            r"\usepackage{fontspec}",
+            r"\usepackage{polyglossia}",
+            r"\setmainlanguage{russian}",
+            r"\setotherlanguage{english}",
+            r"\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}",
+            r"\setmainfont{DejaVu Serif}",
+            r"\setsansfont{DejaVu Sans}",
+            r"\setmonofont{DejaVu Sans Mono}",
+            ""
+        ]
+    else:
+        # Для обычных документов
+        new_preamble = [
+            "% Поддержка русского языка (автоматически добавлено)",
+            r"\usepackage{fontspec}",
+            r"\usepackage[russian]{babel}",
+            r"\setmainfont{DejaVu Serif}",
+            r"\setsansfont{DejaVu Sans}",
+            r"\setmonofont{DejaVu Sans Mono}",
+            ""
+        ]
 
     if r"\documentclass" in content_without_babel:
         lines = content_without_babel.splitlines()
