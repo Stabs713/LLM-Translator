@@ -4,6 +4,7 @@ import tempfile
 import shutil
 import zipfile
 
+
 def compile_tex_to_pdf_via_docker(tex_path):
     """Компилирует .tex файл в .pdf с помощью Docker и XeLaTeX."""
     if not os.path.exists(tex_path):
@@ -44,7 +45,9 @@ def compile_tex_to_pdf_via_docker(tex_path):
             print(f"💥 Ошибка: {e}")
     return False
 
+
 def compile_zip_to_pdf_via_docker(zip_path, main_tex_name):
+    """Компилирует ZIP с LaTeX файлами в PDF"""
     if not os.path.exists(zip_path):
         print("❌ ZIP-файл не найден.")
         return False

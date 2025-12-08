@@ -4,95 +4,186 @@ import sys
 from tqdm import tqdm
 import re
 
-try:
-    from pylatexenc.latexwalker import (
-        LatexWalker,
-        LatexMacroNode,
-        LatexCharsNode,
-        LatexGroupNode,
-        LatexEnvironmentNode,
-        LatexSpecialsNode
-    )
-except ImportError:
-    LatexWalker = None
+from common import translate_chunk
 
-from common import (
-    PROTECTED_MACROS,
-    TRANSLATABLE_MACROS,
-    PROTECTED_ENVIRONMENTS,
-    TRANSLATABLE_ENVIRONMENTS,
-    translate_chunk
-)
 
-translatable_texts = []
-text_spans = []
+def translate_latex_text(latex_content, max_chunk_size=2000):
+    """
+    Полный перевод LaTeX с сохранением структуры документа
+    """
 
-def translate_latex_text(latex_content, max_tokens=1200):
-    global translatable_texts, text_spans
-    if LatexWalker is None:
-        print("❌ Установите pylatexenc: pip install pylatexenc")
-        sys.exit(1)
+    # Шаг 1: Разделяем на преамбулу, begin/end document и тело
+    begin_doc = r'\begin{document}'
+    end_doc = r'\end{document}'
 
-    translatable_texts = []
-    text_spans = []
+    if begin_doc not in latex_content:
+        # Нет структуры документа - переводим всё как есть
+        return translate_body(latex_content, max_chunk_size)
 
-    walker = LatexWalker(latex_content)
-    nodelist, _, _ = walker.get_latex_nodes(pos=0)
+    # Разделяем
+    parts = latex_content.split(begin_doc, 1)
+    preamble = parts[0]
+    rest = parts[1] if len(parts) > 1 else ""
 
-    def collect_text(node, inside_math=False, inside_protected=False):
-        if isinstance(node, LatexCharsNode):
-            text = node.chars
-            if text.strip() and not inside_math and not inside_protected:
-                start_pos = node.pos
-                end_pos = start_pos + len(text)
-                translatable_texts.append(text)
-                text_spans.append((start_pos, end_pos))
-        elif isinstance(node, LatexMacroNode):
-            macro_name = node.macroname or ""
-            is_protected = macro_name in PROTECTED_MACROS
-            new_inside_protected = inside_protected or is_protected
-            if node.nodeargd:
-                for arg in node.nodeargd.argnlist:
-                    if arg is not None:
-                        collect_text(arg, inside_math=inside_math, inside_protected=new_inside_protected)
-        elif isinstance(node, LatexEnvironmentNode):
-            env_name = node.envname or ""
-            math_env = env_name in {'equation', 'align', 'gather', 'displaymath', 'math'}
-            is_protected_env = env_name in PROTECTED_ENVIRONMENTS
-            new_inside_protected = inside_protected or is_protected_env
-            for child in node.nodelist:
-                collect_text(child, inside_math=math_env, inside_protected=new_inside_protected)
-        elif isinstance(node, LatexGroupNode):
-            for child in node.nodelist:
-                collect_text(child, inside_math=inside_math, inside_protected=inside_protected)
-        elif isinstance(node, LatexSpecialsNode):
-            pass
+    if end_doc in rest:
+        body_parts = rest.split(end_doc, 1)
+        body = body_parts[0]
+        postamble = end_doc + body_parts[1] if len(body_parts) > 1 else end_doc
+    else:
+        body = rest
+        postamble = ""
 
-    for node in nodelist:
-        collect_text(node)
+    # Шаг 2: Обрабатываем преамбулу - переводим \title и \author
+    translated_preamble = translate_preamble(preamble)
 
-    translated_texts = []
-    for text in tqdm(translatable_texts, desc="Перевод LaTeX"):
-        translated = translate_chunk(text)
-        translated_texts.append(translated)
+    # Шаг 3: Переводим тело документа
+    translated_body = translate_body(body, max_chunk_size)
 
-    result = list(latex_content)
-    for i in range(len(text_spans) - 1, -1, -1):
-        start, end = text_spans[i]
-        del result[start:end]
-        for j, char in enumerate(translated_texts[i]):
-            result.insert(start + j, char)
+    # Шаг 4: Собираем документ обратно
+    return translated_preamble + begin_doc + translated_body + postamble
 
-    return ''.join(result)
+
+def translate_preamble(preamble):
+    """Переводит только \title{} в преамбуле, автора оставляет"""
+    result = preamble
+
+    # Переводим \title{...}
+    def translate_title(match):
+        title_text = match.group(1)
+        # Защищаем математику
+        protected = []
+        def protect(m):
+            protected.append(m.group(0))
+            return f"__P{len(protected)-1}__"
+        title_text = re.sub(r'\$[^$]+\$', protect, title_text)
+
+        # Переводим
+        translated = translate_chunk(title_text)
+
+        # Восстанавливаем
+        for i in range(len(protected)-1, -1, -1):
+            translated = translated.replace(f"__P{i}__", protected[i])
+
+        return f"\\title{{{translated}}}"
+
+    result = re.sub(r'\\title\{([^}]+)\}', translate_title, result)
+
+    # Автора НЕ переводим (обычно имена собственные)
+
+    return result
+
+
+def translate_body(body, max_chunk_size=2000):
+    """Переводит тело документа с защитой математики и технических команд"""
+
+    protected_blocks = []
+
+    def protect_block(match):
+        protected_blocks.append(match.group(0))
+        return f"__PROTECTED_{len(protected_blocks)-1}__"
+
+    text = body
+
+    # Защищаем математику
+    # Display math
+    text = re.sub(r'\\\[.*?\\\]', protect_block, text, flags=re.DOTALL)
+    text = re.sub(r'\\begin\{equation\*?\}.*?\\end\{equation\*?\}', protect_block, text, flags=re.DOTALL)
+    text = re.sub(r'\\begin\{align\*?\}.*?\\end\{align\*?\}', protect_block, text, flags=re.DOTALL)
+    text = re.sub(r'\\begin\{gather\*?\}.*?\\end\{gather\*?\}', protect_block, text, flags=re.DOTALL)
+    text = re.sub(r'\\begin\{multline\*?\}.*?\\end\{multline\*?\}', protect_block, text, flags=re.DOTALL)
+    text = re.sub(r'\$\$.*?\$\$', protect_block, text, flags=re.DOTALL)
+
+    # Inline math
+    text = re.sub(r'\$[^$]+\$', protect_block, text)
+    text = re.sub(r'\\\(.*?\\\)', protect_block, text, flags=re.DOTALL)
+
+    # Технические окружения
+    for env in ['verbatim', 'lstlisting', 'minted', 'code', 'tikzpicture', 'asy']:
+        pattern = rf'\\begin\{{{env}\*?\}}.*?\\end\{{{env}\*?\}}'
+        text = re.sub(pattern, protect_block, text, flags=re.DOTALL)
+
+    # Технические команды (сами команды, не аргументы)
+    text = re.sub(r'(\\label\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\ref\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\eqref\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\cite(?:\[[^\]]*\])?\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\url\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\href\{[^}]*\}\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\includegraphics(?:\[[^\]]*\])?\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\bibliographystyle\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\bibliography\{[^}]*\})', protect_block, text)
+    text = re.sub(r'(\\addbibresource\{[^}]*\})', protect_block, text)
+
+    # Разбиваем на параграфы
+    paragraphs = re.split(r'(\n\s*\n)', text)
+
+    translated_parts = []
+
+    for para in tqdm(paragraphs, desc="Перевод"):
+        if not para.strip():
+            translated_parts.append(para)
+            continue
+
+        # Если только защищённые блоки - не переводим
+        if re.fullmatch(r'[\s__PROTECTED_\d+__]+', para):
+            translated_parts.append(para)
+            continue
+
+        # Проверяем, есть ли что переводить
+        temp = para
+        for i in range(len(protected_blocks)):
+            temp = temp.replace(f"__PROTECTED_{i}__", "")
+
+        # Если после удаления защищённого осталось только пробелы/LaTeX команды
+        if not re.search(r'[a-zA-Z]{2,}', temp):
+            translated_parts.append(para)
+            continue
+
+        # Переводим
+        if len(para) > max_chunk_size:
+            # Разбиваем на предложения
+            sentences = re.split(r'(?<=[.!?])\s+', para)
+            chunks = []
+            current = []
+            current_len = 0
+
+            for sent in sentences:
+                if current_len + len(sent) > max_chunk_size and current:
+                    chunks.append(' '.join(current))
+                    current = [sent]
+                    current_len = len(sent)
+                else:
+                    current.append(sent)
+                    current_len += len(sent)
+
+            if current:
+                chunks.append(' '.join(current))
+
+            translated = ' '.join(translate_chunk(chunk) for chunk in chunks if chunk.strip())
+        else:
+            translated = translate_chunk(para)
+
+        translated_parts.append(translated)
+
+    result = ''.join(translated_parts)
+
+    # Восстанавливаем защищённые блоки
+    for i in range(len(protected_blocks) - 1, -1, -1):
+        result = result.replace(f"__PROTECTED_{i}__", protected_blocks[i])
+
+    return result
+
 
 def restore_bibliography_commands(original_content, translated_content):
+    """Восстанавливает библиографические команды из оригинала"""
     orig_style = re.search(r'\\bibliographystyle\{([^}]+)\}', original_content)
     if orig_style:
         style_name = orig_style.group(1)
         translated_content = re.sub(
             r'\\bibliographystyle\{[^}]*\}',
-            lambda m: f'\\bibliographystyle{{{style_name}}}',
-            translated_content
+            f'\\\\bibliographystyle{{{style_name}}}',
+            translated_content,
+            count=1
         )
 
     orig_bib = re.search(r'\\bibliography\{([^}]+)\}', original_content)
@@ -100,16 +191,17 @@ def restore_bibliography_commands(original_content, translated_content):
         bib_name = orig_bib.group(1)
         translated_content = re.sub(
             r'\\bibliography\{[^}]*\}',
-            lambda m: f'\\bibliography{{{bib_name}}}',
-            translated_content
+            f'\\\\bibliography{{{bib_name}}}',
+            translated_content,
+            count=1
         )
 
     return translated_content
 
+
 def process_zip_for_translation(zip_path, output_dir):
+    """Обрабатывает ZIP-архив с LaTeX файлами"""
     import tempfile
-    import zipfile
-    import os
 
     with tempfile.TemporaryDirectory() as tmp_extract_dir:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -139,11 +231,15 @@ def process_zip_for_translation(zip_path, output_dir):
             print("⚠️ Не найден \\begin{document}. Используем первый .tex как главный.")
 
         for tex_path in tex_files:
+            print(f"\n📄 Перевод файла: {os.path.basename(tex_path)}")
             with open(tex_path, 'r', encoding='utf-8') as f:
                 original_content = f.read()
+
             content_with_preamble = add_russian_preamble(original_content)
             translated = translate_latex_text(content_with_preamble)
             translated = restore_bibliography_commands(original_content, translated)
+
+            # Восстанавливаем \documentclass из оригинала
             docclass_match = re.search(r'\\documentclass(?:\[[^\]]*\])?\{[^\}]+\}', original_content)
             if docclass_match:
                 orig_docclass = docclass_match.group(0)
@@ -153,11 +249,13 @@ def process_zip_for_translation(zip_path, output_dir):
                     translated,
                     count=1
                 )
+
             with open(tex_path, 'w', encoding='utf-8') as f:
                 f.write(translated)
 
         base_name = os.path.splitext(os.path.basename(zip_path))[0]
         output_zip = os.path.join(output_dir, f"{base_name}_translated.zip")
+
         with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as new_zip:
             for root, _, files in os.walk(tmp_extract_dir):
                 for file in files:
@@ -168,10 +266,13 @@ def process_zip_for_translation(zip_path, output_dir):
         main_tex_rel = os.path.relpath(main_tex, tmp_extract_dir)
         return output_zip, main_tex_rel
 
+
 def add_russian_preamble(latex_content):
+    """Добавляет поддержку русского языка в преамбулу"""
     if r"\documentclass" not in latex_content:
         return latex_content
 
+    # Удаляем старые babel команды
     lines = []
     for line in latex_content.splitlines():
         if r"\usepackage[" in line and "babel" in line:

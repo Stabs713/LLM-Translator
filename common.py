@@ -12,31 +12,31 @@ OUTPUT_DIR = "outputs"
 PROTECTED_MACROS = {
     # Базовые команды документа
     'documentclass', 'usepackage', 'RequirePackage',
-    
+
     # Метки и ссылки
     'label', 'ref', 'eqref', 'pageref', 'autoref',
-    
+
     # Библиография
     'cite', 'bibitem', 'bibliographystyle', 'bibliography', 'nocite',
-    
+
     # Графика и файлы
     'includegraphics', 'input', 'include', 'subfile',
-    
+
     # Гиперссылки
-    'url', 'href', 'footnote', 'footnotemark', 'footnotetext',
-    
+    'url', 'href', 'footnotemark', 'footnotetext',
+
     # Таблицы и матрицы
     'hline', 'cline', 'multicolumn', 'multirow', 'cellcolor',
-    
+
     # Оформление
     'pagestyle', 'pagenumbering', 'thispagestyle',
-    
+
     # Математика (команды, а не содержимое)
     'newcommand', 'renewcommand', 'DeclareMathOperator',
-    
+
     # Индекс и глоссарии
     'index', 'gls', 'glsadd', 'printglossary',
-    
+
     # Прочие технические
     'begin', 'end',
     'addbibresource',
@@ -50,35 +50,34 @@ TRANSLATABLE_MACROS = {
     # Структура документа
     'section', 'subsection', 'subsubsection', 'paragraph', 'subparagraph',
     'chapter', 'part', 'title', 'author', 'date', 'affil',
-    
+
     # Оформление текста
     'caption', 'shortcaption',
     'textbf', 'textit', 'emph', 'underline', 'texttt', 'textsf', 'textrm',
     'textsc', 'textsl', 'textsuperscript', 'textsubscript',
-    
+
     # Списки и абзацы
     'item', 'footnote',
-    
+
     # Абстракт и блоки
     'abstract', 'keywords',
-    
+
     # Теоремы и определения
     'theorem', 'lemma', 'proposition', 'definition', 'corollary',
 }
 
-# Защищённые окружения (НЕ переводим)
+# Защищённые окружения (НЕ переводим содержимое)
 PROTECTED_ENVIRONMENTS = {
     # Математика
     'equation', 'equation*', 'align', 'align*', 'gather', 'gather*',
     'multline', 'multline*', 'eqnarray', 'eqnarray*', 'displaymath',
     'math', '$',
-    
-    # Код и верbatim
+
+    # Код и verbatim
     'verbatim', 'lstlisting', 'minted', 'code', 'Verbatim',
-    
-    # Прочие
+
+    # Прочие технические
     'tikzpicture', 'asy', 'pspicture',
-    'tabular', 'tabularx', 'tabulary', 'longtable',
 }
 
 # Транслируемые окружения (переводим содержимое)
@@ -87,12 +86,14 @@ TRANSLATABLE_ENVIRONMENTS = {
     'center', 'flushleft', 'flushright',
     'quote', 'quotation', 'verse',
     'itemize', 'enumerate', 'description',
+    'tabular', 'tabularx', 'tabulary', 'longtable',
 }
 
 # Глобальные переменные
 PROXY_API_URL = None
 PROXY_API_KEY = None
 CURRENT_MODEL = "gpt-4o"
+
 
 def load_env_vars():
     global PROXY_API_URL, PROXY_API_KEY
@@ -102,18 +103,23 @@ def load_env_vars():
     if not PROXY_API_KEY:
         raise ValueError("❌ PROXY_API_KEY не найден в .env. Добавьте его.")
 
+
 def set_current_model(model_name):
     global CURRENT_MODEL
     CURRENT_MODEL = model_name
 
+
 def get_current_model():
     return CURRENT_MODEL
 
-def chunk_text_by_sentences_safe(text, max_tokens=1200):
+
+def chunk_text_by_sentences_safe(text, max_tokens=1500):
+    """Разбивает текст на чанки по предложениям с улучшенным regex"""
     if not text.strip():
         return [text]
 
-    sentences = re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z])', text.strip())
+    # Улучшенный regex: учитывает цифры и скобки в начале предложения
+    sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZА-Я\d(])', text.strip())
     if not sentences:
         return [text]
 
@@ -140,26 +146,42 @@ def chunk_text_by_sentences_safe(text, max_tokens=1200):
 
     return chunks
 
-def translate_chunk(text, retries=3):
-    prompt = f"""Переведи ТОЛЬКО текст с английского на русский. Сохрани:
-- все формулы, команды LaTeX (\\section, \\texttt, \\url, \\begin{{...}}, и т.д.) без изменений,
-- исходную структуру и пунктуацию.
-НЕ ДОБАВЛЯЙ ничего от себя: никаких комментариев, пояснений или фраз вроде "Вы не предоставили текст".
 
-Текст:
-{text}"""
+def translate_chunk(text, retries=3):
+    """Переводит один чанк текста с улучшенным промптом"""
+
+    # Если текст состоит только из LaTeX команд и placeholder'ов, не переводим
+    if re.fullmatch(r'[\s\\{}\[\]_^&$__PROTECTED_\d+__]+', text):
+        return text
+
+    prompt = f"""Переведи весь английский текст на русский. КРИТИЧЕСКИ ВАЖНО:
+
+1. Переводи АБСОЛЮТНО ВСЁ что является текстом (слова, заголовки, подписи, содержимое таблиц)
+2. НЕ ТРОГАЙ:
+   - Математические формулы и символы: $...$, $$...$$, \\[...\\], dXt, µ, σ, Wt и т.д.
+   - LaTeX команды: \\section, \\caption, \\textbf, \\begin, \\end
+   - Структуру таблиц: &, \\\\, \\hline
+   - Маркеры __PROTECTED_N__
+3. Переводи содержимое внутри фигурных скобок: \\section{{Introduction}} → \\section{{Введение}}
+4. Переводи содержимое таблиц: Parameter → Параметр, Value → Значение
+5. НЕ добавляй комментарии, пояснения, не пиши "Вот перевод"
+
+Текст для перевода:
+{text}
+
+Переведённый текст:"""
 
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {PROXY_API_KEY}"
     }
-    
+
     payload = {
         "model": get_current_model(),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 2000,
-        "temperature": 0.1,
-        "top_p": 0.9
+        "max_tokens": 3000,
+        "temperature": 0.2,
+        "top_p": 0.95
     }
 
     for attempt in range(retries):
@@ -177,7 +199,9 @@ def translate_chunk(text, retries=3):
             time.sleep(1)
     return text
 
+
 def test_model_connection(model_name):
+    """Проверяет подключение к модели"""
     print(f"🌐 Проверка подключения к модели: {model_name}")
     headers = {
         "Content-Type": "application/json",
@@ -200,15 +224,21 @@ def test_model_connection(model_name):
         print(f"❌ Не удалось подключиться: {e}")
         return False
 
+
 def get_files_list(directory):
+    """Получает список файлов для перевода"""
     files = [f for f in os.listdir(directory) if f.lower().endswith(('.docx', '.tex', '.zip'))]
     return sorted(files)
 
+
 def get_tex_files_list(directory):
+    """Получает список .tex файлов"""
     files = [f for f in os.listdir(directory) if f.lower().endswith('.tex')]
     return sorted(files)
 
+
 def select_file_by_number(total_count):
+    """Выбор файла по номеру"""
     while True:
         try:
             choice = int(input(f"\nВыберите номер файла (1-{total_count}): ").strip())
@@ -219,24 +249,10 @@ def select_file_by_number(total_count):
         except ValueError:
             print("❌ Введите число.")
 
-def select_main_action():
-    print("\nЧто вы хотите сделать?")
-    print("1. Перевести файл (.docx, .tex, .zip)")
-    print("2. Скомпилировать .tex в PDF")
-    while True:
-        try:
-            choice = int(input("Выберите действие (1 или 2): ").strip())
-            if choice == 1:
-                return "translate"
-            elif choice == 2:
-                return "compile"
-            else:
-                print("❌ Введите 1 или 2.")
-        except ValueError:
-            print("❌ Введите число.")
 
 def select_translation_model():
-    model_names = ["gpt-4o", "gpt-4.1"]
+    """Выбор модели перевода"""
+    model_names = ["gpt-4o", "gpt-4o-mini"]
     print("\nДоступные модели для перевода:")
     for i, name in enumerate(model_names, 1):
         print(f"  {i}. {name}")

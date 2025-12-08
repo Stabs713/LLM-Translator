@@ -10,26 +10,36 @@ REFERENCE_TITLES = {
     'литература', 'список литературы', 'источники'
 }
 
+
 def mask_display_formulas(text):
+    """Маскирует формулы в тексте перед переводом"""
     placeholders = []
-    
+
     def repl(match):
         orig = match.group(0)
-        cleaned = re.sub(r'\\\s*([a-zA-Z]+)\s*\{', r'\\\1{', orig)
+        cleaned = re.sub(r'\\\s*([a-zA-Z]+)\s*\{', r'\\\\\1{', orig)
         cleaned = re.sub(r'\s*([_{}=(),;:\.\+\-\*\/\^])\s*', r'\1', cleaned)
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         placeholders.append(cleaned)
         return f"__MATH_{len(placeholders)-1}__"
-    
+
+    # Маскируем display формулы
     text = re.sub(r'\$\$(.+?)\$\$', repl, text, flags=re.DOTALL)
+    # Маскируем inline формулы
+    text = re.sub(r'\$([^$]+)\$', repl, text)
+
     return text, placeholders
 
+
 def unmask_formulas(text, placeholders):
+    """Восстанавливает формулы после перевода"""
     for i in range(len(placeholders) - 1, -1, -1):
         text = text.replace(f"__MATH_{i}__", placeholders[i])
     return text
 
+
 def translate_docx(input_path, output_path):
+    """Переводит DOCX файл"""
     try:
         doc = Document(input_path)
     except Exception as e:
