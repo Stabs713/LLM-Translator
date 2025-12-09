@@ -249,25 +249,27 @@ def translate_body(body, max_chunk_size=2000):
     return result
 
 def restore_bibliography_commands(original_content, translated_content):
-    """Восстанавливает библиографические команды из оригинала"""
+    """Восстанавливает библиографические команды из оригинала без лишних backslash."""
+    # bibliographystyle
     orig_style = re.search(r'\\bibliographystyle\{([^}]+)\}', original_content)
     if orig_style:
         style_name = orig_style.group(1)
         translated_content = re.sub(
             r'\\bibliographystyle\{[^}]*\}',
-            f'\\\\bibliographystyle{{{style_name}}}',
+            f'\\bibliographystyle{{{style_name}}}',
             translated_content,
-            count=1
+            count=1,
         )
 
+    # bibliography
     orig_bib = re.search(r'\\bibliography\{([^}]+)\}', original_content)
     if orig_bib:
         bib_name = orig_bib.group(1)
         translated_content = re.sub(
             r'\\bibliography\{[^}]*\}',
-            f'\\\\bibliography{{{bib_name}}}',
+            f'\\bibliography{{{bib_name}}}',
             translated_content,
-            count=1
+            count=1,
         )
 
     return translated_content
