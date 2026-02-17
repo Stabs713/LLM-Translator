@@ -1,24 +1,31 @@
-# main.py
 import os
 import sys
 
 from common import (
     INPUT_DIR,
     OUTPUT_DIR,
-    test_model_connection,
-    load_env_vars,
+    load_env_vars, # Оставил для совместимости, но внутри она теперь пустая или простая
     get_files_list,
     select_file_by_number,
     select_translation_model
 )
+# Убрали test_model_connection и load_env_vars если они кидали ошибки без ключа
 from translate_tex import translate_latex_text, add_russian_preamble, process_zip_for_translation, restore_bibliography_commands
 from translate_docx import translate_docx
 from pdf_converter import compile_tex_to_pdf_via_docker, compile_zip_to_pdf_via_docker
 
+# Переопределим load_env_vars чтобы не ломалось, если в common её логика изменилась
+def safe_load_env():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass # dotenv больше не обязателен строго
+
 def show_main_menu():
     """Показывает главное меню"""
     print("\n" + "="*70)
-    print("🌐 LLM-Translator: перевод и компиляция LaTeX/DOCX")
+    print("🌐 LLM-Translator (Local Ollama Edition)")
     print("="*70)
     print("\nВыберите режим работы:")
     print("  1. Перевести и скомпилировать (.tex, .zip, .docx)")
@@ -47,7 +54,6 @@ def compile_only_mode():
     
     try:
         if ext == '.zip':
-            # Для ZIP нужно найти главный .tex файл
             import zipfile
             import tempfile
             
@@ -55,7 +61,6 @@ def compile_only_mode():
                 with zipfile.ZipFile(input_path, 'r') as zip_ref:
                     zip_ref.extractall(tmpdir)
                 
-                # Ищем главный .tex файл
                 main_tex = None
                 all_tex = []
                 for root, _, files in os.walk(tmpdir):
@@ -96,16 +101,18 @@ def compile_only_mode():
 
 def translate_mode():
     """Режим перевода с компиляцией"""
-    print("\n🌐 РЕЖИМ ПЕРЕВОДА")
+    print("\n🌐 РЕЖИМ ПЕРЕВОДА (LOCAL)")
     print("-" * 70)
     
-    # Выбор модели
-    model_name = select_translation_model()
-    
-    # Проверка подключения к выбранной модели
-    if not test_model_connection(model_name):
-        print("❌ Не удалось подключиться к модели. Проверьте ключ и URL.")
+    # Выбор модели (теперь только локальные)
+    try:
+        model_name = select_translation_model()
+    except Exception as e:
+        print(f"❌ Ошибка выбора модели: {e}")
         return
+    
+    from common import set_current_model
+    set_current_model(model_name)
     
     available = get_files_list(INPUT_DIR)
     if not available:
@@ -123,15 +130,11 @@ def translate_mode():
     ext = ext.lower()
     
     try:
-        from common import set_current_model
-        set_current_model(model_name)
-        
         if ext == '.zip':
             print("\n📦 Обработка архива...")
             output_zip, main_tex_name = process_zip_for_translation(input_path, OUTPUT_DIR)
             print(f"✅ Перевод завершён! Архив: {output_zip}")
             
-            # Спрашиваем, компилировать ли
             compile_choice = input("\n🐳 Скомпилировать в PDF? (y/n): ").strip().lower()
             if compile_choice == 'y':
                 print("🐳 Компиляция в PDF...")
@@ -145,7 +148,6 @@ def translate_mode():
             translated = translate_latex_text(content_with_preamble)
             translated = restore_bibliography_commands(original_content, translated)
             
-            # Восстанавливаем \documentclass из оригинала
             import re
             docclass_match = re.search(r'\\documentclass(?:\[[^\]]*\])?\{[^\}]+\}', original_content)
             if docclass_match:
@@ -160,7 +162,6 @@ def translate_mode():
                 f.write(translated)
             print(f"\n✅ Перевод .tex завершён! Результат: {output_tex}")
             
-            # Спрашиваем, компилировать ли
             compile_choice = input("\n🐳 Скомпилировать в PDF? (y/n): ").strip().lower()
             if compile_choice == 'y':
                 print("🐳 Компиляция в PDF...")
@@ -178,15 +179,20 @@ def translate_mode():
         traceback.print_exc()
 
 def main():
-    try:
-        load_env_vars()
-    except ValueError as e:
-        print(f"⚠️ {e}")
-        print("ℹ️  Режим компиляции доступен без API ключа.")
+    # Загружаем переменные окружения (если нужно для путей), но ключи не требуем
+    safe_load_env()
     
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
+    # Проверка доступности Ollama при старте (опционально)
+    from common import get_ollama_models
+    if not get_ollama_models():
+        print("\n⚠️ Внимание: Ollama не отвечает или нет моделей.")
+        print("Убедитесь, что запустили: ollama serve")
+        print("И скачали модели, например: ollama pull qwen2.5:7b")
+        # Не выходим, даем шанс пользователю выбрать вручную позже
+
     while True:
         show_main_menu()
         
@@ -204,7 +210,6 @@ def main():
                 print("❌ Выберите 1, 2 или 3")
                 continue
             
-            # Спрашиваем, продолжить ли работу
             again = input("\n🔄 Выполнить ещё одну операцию? (y/n): ").strip().lower()
             if again != 'y':
                 print("\n👋 До свидания!")

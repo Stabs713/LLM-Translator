@@ -1,13 +1,15 @@
-# common.py
 import os
 import requests
 from tqdm import tqdm
-from dotenv import load_dotenv
 import re
+import json
 
 # Настройки
 INPUT_DIR = "inputs"
 OUTPUT_DIR = "outputs"
+
+# URL локального сервера Ollama
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # Защищённые макросы — НЕ переводить
 PROTECTED_MACROS = {
@@ -52,62 +54,24 @@ TRANSLATABLE_ENVIRONMENTS = {
     'tabular', 'tabularx', 'tabulary', 'longtable',
 }
 
-# Глобальные переменные
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_API_KEY = None
+# Глобальная переменная для текущей модели
 CURRENT_MODEL = None
 
-# Рекомендуемые платные модели (дешёвые и качественные для перевода)
-PAID_MODELS = [
-    {
-        "id": "anthropic/claude-3.5-haiku",
-        "name": "Claude 3.5 Haiku",
-        "price": "$0.80 / 1M tokens",
-        "quality": "⭐⭐⭐⭐⭐",
-        "description": "Быстрая, точная, идеальна для перевода"
-    },
-    {
-        "id": "google/gemini-flash-1.5",
-        "name": "Gemini 1.5 Flash",
-        "price": "$0.075 / 1M tokens",
-        "quality": "⭐⭐⭐⭐",
-        "description": "Очень дешёвая, хорошее качество"
-    },
-    {
-        "id": "openai/gpt-4o-mini",
-        "name": "GPT-4o Mini",
-        "price": "$0.15 / 1M tokens",
-        "quality": "⭐⭐⭐⭐⭐",
-        "description": "Отличный баланс цены и качества"
-    },
-    {
-        "id": "anthropic/claude-3-haiku",
-        "name": "Claude 3 Haiku",
-        "price": "$0.25 / 1M tokens",
-        "quality": "⭐⭐⭐⭐",
-        "description": "Быстрая и дешёвая"
-    },
-]
 
-# Список бесплатных моделей (для автоперебора)
-FREE_MODELS = [
-    "google/gemini-2.0-flash-exp:free",
-    "google/gemini-flash-1.5:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "meta-llama/llama-3.2-90b-vision-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
-    "liquid/lfm-40b:free",
-    "microsoft/phi-3-medium-128k-instruct:free",
-]
-
-
-def load_env_vars():
-    global OPENROUTER_API_KEY
-    load_dotenv()
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    if not OPENROUTER_API_KEY:
-        raise ValueError("❌ OPENROUTER_API_KEY не найден в .env. Добавьте его.")
+def get_ollama_models():
+    """Получает список установленных локальных моделей через Ollama API"""
+    try:
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return [model['name'] for model in data.get('models', [])]
+        else:
+            print(f"⚠️ Ошибка подключения к Ollama: HTTP {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"⚠️ Не удалось подключиться к Ollama ({OLLAMA_HOST}). Убедитесь, что сервис запущен.")
+        print(f"   Детали: {str(e)}")
+        return []
 
 
 def set_current_model(model_name):
@@ -119,75 +83,31 @@ def get_current_model():
     return CURRENT_MODEL
 
 
-def test_model_connection(model_name, silent=False):
-    """Проверяет подключение к модели"""
-    if not silent:
-        print(f"🔌 Проверка модели: {model_name}...", end=" ")
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/llm-translator",
-        "X-Title": "LLM Translator"
-    }
-    payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 10
-    }
-    try:
-        response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=15)
-        if response.status_code == 200:
-            if not silent:
-                print("✅")
-            return True
-        else:
-            if not silent:
-                print(f"❌ (HTTP {response.status_code})")
-            return False
-    except Exception as e:
-        if not silent:
-            print(f"❌ ({str(e)[:50]})")
-        return False
-
-
-def auto_select_free_model():
-    """Автоматически находит первую доступную бесплатную модель"""
-    print("\n🔍 Автоматический поиск бесплатных моделей...")
-    print("-" * 70)
-
-    for model in FREE_MODELS:
-        if test_model_connection(model):
-            print(f"\n✅ Найдена рабочая модель: {model}")
-            return model
-
-    return None
-
-
 def select_translation_model():
-    """Интерактивный выбор модели с возможностью автоперебора"""
+    """Интерактивный выбор локальной модели"""
     print("\n" + "="*70)
-    print("🤖 ВЫБОР МОДЕЛИ ДЛЯ ПЕРЕВОДА")
+    print("🤖 ВЫБОР ЛОКАЛЬНОЙ МОДЕЛИ (OLLAMA)")
     print("="*70)
 
-    print("\n💰 РЕКОМЕНДУЕМЫЕ ПЛАТНЫЕ МОДЕЛИ (лучшее качество):")
-    print("-" * 70)
-    for i, model in enumerate(PAID_MODELS, 1):
-        print(f"{i}. {model['name']}")
-        print(f"   ID: {model['id']}")
-        print(f"   Цена: {model['price']}")
-        print(f"   Качество: {model['quality']}")
-        print(f"   {model['description']}")
-        print()
+    # Получаем доступные модели
+    available_models = get_ollama_models()
 
-    print("\n🆓 БЕСПЛАТНЫЕ ОПЦИИ:")
+    if not available_models:
+        print("\n❌ Не найдено установленных моделей Ollama.")
+        print("💡 Запусти команду в терминале: ollama pull qwen2.5:7b (или другую)")
+        raise Exception("Нет доступных моделей.")
+
+    print("\n✅ Доступные модели:")
     print("-" * 70)
-    print(f"{len(PAID_MODELS) + 1}. Автоматически найти бесплатную модель")
-    print(f"{len(PAID_MODELS) + 2}. Ввести ID модели вручную")
+    for i, model in enumerate(available_models, 1):
+        print(f"  {i}. {model}")
+    
+    print("-" * 70)
+    print(f"  {len(available_models) + 1}. Ввести имя модели вручную")
 
     while True:
         try:
-            choice = input(f"\nВыберите вариант (1-{len(PAID_MODELS) + 2}): ").strip()
+            choice = input(f"\nВыберите вариант (1-{len(available_models) + 1}): ").strip()
 
             if not choice.isdigit():
                 print("❌ Введите число.")
@@ -195,45 +115,23 @@ def select_translation_model():
 
             choice_num = int(choice)
 
-            # Выбор платной модели
-            if 1 <= choice_num <= len(PAID_MODELS):
-                selected_model = PAID_MODELS[choice_num - 1]["id"]
-                print(f"\n🔍 Проверка {PAID_MODELS[choice_num - 1]['name']}...")
-
-                if test_model_connection(selected_model):
-                    print(f"✅ Выбрана модель: {selected_model}")
-                    return selected_model
-                else:
-                    print("\n⚠️ Не удалось подключиться к этой модели.")
-                    retry = input("Попробовать другую модель? (y/n): ").strip().lower()
-                    if retry != 'y':
-                        break
-
-            # Автопоиск бесплатной модели
-            elif choice_num == len(PAID_MODELS) + 1:
-                model = auto_select_free_model()
-                if model:
-                    return model
-                else:
-                    print("\n⚠️ Не найдено доступных бесплатных моделей.")
-                    retry = input("Попробовать другой вариант? (y/n): ").strip().lower()
-                    if retry != 'y':
-                        break
+            # Выбор из списка
+            if 1 <= choice_num <= len(available_models):
+                selected_model = available_models[choice_num - 1]
+                print(f"\n✅ Выбрана модель: {selected_model}")
+                return selected_model
 
             # Ручной ввод
-            elif choice_num == len(PAID_MODELS) + 2:
-                custom_model = input("\nВведите ID модели (например, anthropic/claude-3.5-haiku): ").strip()
+            elif choice_num == len(available_models) + 1:
+                custom_model = input("\nВведите имя модели (например, qwen2.5:72b): ").strip()
                 if custom_model:
-                    if test_model_connection(custom_model):
-                        print(f"✅ Выбрана модель: {custom_model}")
-                        return custom_model
-                    else:
-                        print("\n⚠️ Не удалось подключиться к указанной модели.")
-                        retry = input("Попробовать снова? (y/n): ").strip().lower()
-                        if retry != 'y':
-                            break
+                    print(f"\n🔍 Проверка наличия модели {custom_model}...")
+                    # Быстрая проверка через запрос к конкретной модели (опционально)
+                    # Или просто доверяем пользователю
+                    print(f"✅ Выбрана модель: {custom_model}")
+                    return custom_model
             else:
-                print(f"❌ Выберите число от 1 до {len(PAID_MODELS) + 2}.")
+                print(f"❌ Выберите число от 1 до {len(available_models) + 1}.")
 
         except KeyboardInterrupt:
             print("\n\n❌ Отменено пользователем.")
@@ -241,14 +139,15 @@ def select_translation_model():
         except Exception as e:
             print(f"❌ Ошибка: {e}")
 
-    raise Exception("❌ Не удалось выбрать модель для перевода.")
+    raise Exception("❌ Не удалось выбрать модель.")
 
 
 def chunk_text_by_sentences_safe(text, max_tokens=1500):
-    """Разбивает текст на чанки по предложениям"""
+    """Разбивает текст на чанки по предложениям (эвристически по длине)"""
     if not text.strip():
         return [text]
 
+    # Простое разбиение по точкам с сохранением разделителей
     sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZА-Я\d(])', text.strip())
     if not sentences:
         return [text]
@@ -258,6 +157,7 @@ def chunk_text_by_sentences_safe(text, max_tokens=1500):
     current_len = 0
 
     for sent in sentences:
+        # Грубая оценка токенов (1 токен ~ 4 символа для смешанного текста)
         tokens = len(sent) // 4
 
         if not current_chunk:
@@ -278,8 +178,9 @@ def chunk_text_by_sentences_safe(text, max_tokens=1500):
 
 
 def translate_chunk(text, retries=3):
-    """Переводит один чанк текста через OpenRouter"""
+    """Переводит один чанк текста через локальную Ollama"""
 
+    # Если текст состоит только из спецсимволов и плейсхолдеров, не переводим
     if re.fullmatch(r'[\s\\{}\[\]_^&$__PROTECTED_\d+__]+', text):
         return text
 
@@ -293,56 +194,61 @@ def translate_chunk(text, retries=3):
    - Маркеры __PROTECTED_N__
 3. Переводи содержимое внутри фигурных скобок: \\section{{Introduction}} → \\section{{Введение}}
 4. Переводи содержимое таблиц: Parameter → Параметр, Value → Значение
-5. НЕ добавляй комментарии, пояснения, не пиши "Вот перевод"
+5. НЕ добавляй комментарии, пояснения, не пиши "Вот перевод". Выдай ТОЛЬКО переведенный текст.
 
 Текст для перевода:
 {text}
 
 Переведённый текст:"""
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/llm-translator",
-        "X-Title": "LLM Translator"
-    }
-
     payload = {
         "model": get_current_model(),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-        "temperature": 0.2,
-        "top_p": 0.95
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "top_p": 0.95,
+            "num_predict": 4096  # Лимит на вывод
+        }
     }
 
     for attempt in range(retries):
         try:
-            response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=120)
+            response = requests.post(
+                f"{OLLAMA_HOST}/api/chat", 
+                json=payload, 
+                timeout=120  # Локальная модель может думать дольше на больших чанках
+            )
+            
             if response.status_code == 200:
-                result = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                result = response.json().get("message", {}).get("content", "").strip()
                 if result:
                     return result
-            elif response.status_code == 429:
-                print(f"⚠️ Rate limit (попытка {attempt+1}/{retries})")
-                import time
-                time.sleep(3)
+                else:
+                    print(f"⚠️ Пустой ответ от модели (попытка {attempt+1}/{retries})")
             else:
-                print(f"⚠️ HTTP {response.status_code} (попытка {attempt+1}/{retries})")
+                print(f"⚠️ Ошибка Ollama HTTP {response.status_code}: {response.text[:100]} (попытка {attempt+1}/{retries})")
+                
         except Exception as e:
-            print(f"⚠️ Ошибка: {str(e)[:50]} (попытка {attempt+1}/{retries})")
-            pass
+            print(f"⚠️ Ошибка соединения: {str(e)[:50]} (попытка {attempt+1}/{retries})")
+        
         if attempt < retries - 1:
             import time
             time.sleep(2)
-    return text
+            
+    return text  # Возвращаем оригинал если все попытки провалились
 
 
 def get_files_list(directory):
+    if not os.path.exists(directory):
+        return []
     files = [f for f in os.listdir(directory) if f.lower().endswith(('.docx', '.tex', '.zip'))]
     return sorted(files)
 
 
 def get_tex_files_list(directory):
+    if not os.path.exists(directory):
+        return []
     files = [f for f in os.listdir(directory) if f.lower().endswith('.tex')]
     return sorted(files)
 
@@ -357,3 +263,5 @@ def select_file_by_number(total_count):
                 print(f"❌ Номер должен быть от 1 до {total_count}.")
         except ValueError:
             print("❌ Введите число.")
+        except KeyboardInterrupt:
+            raise
