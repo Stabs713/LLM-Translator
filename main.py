@@ -55,31 +55,38 @@ def compile_only_mode():
                 with zipfile.ZipFile(input_path, 'r') as zip_ref:
                     zip_ref.extractall(tmpdir)
                 
-                # Ищем главный .tex файл
-                main_tex = None
+                # Собираем все .tex файлы с глубиной вложенности
                 all_tex = []
                 for root, _, files in os.walk(tmpdir):
                     for f in files:
                         if f.lower().endswith('.tex'):
                             full_path = os.path.join(root, f)
-                            all_tex.append(full_path)
-                            if main_tex is None:
-                                try:
-                                    with open(full_path, 'r', encoding='utf-8') as fp:
-                                        if r'\begin{document}' in fp.read():
-                                            main_tex = full_path
-                                except:
-                                    pass
+                            depth = len(os.path.relpath(full_path, tmpdir).split(os.sep))
+                            all_tex.append((full_path, depth))
                 
                 if not all_tex:
                     print("❌ В архиве нет .tex файлов.")
                     return
                 
-                if main_tex is None:
-                    print("⚠️ Не найден \\begin{document}. Используем первый .tex файл.")
-                    main_tex = all_tex[0]
+                # Сортируем по глубине — сначала файлы ближе к корню
+                all_tex.sort(key=lambda x: x[1])
                 
-                main_tex_name = os.path.relpath(main_tex, tmpdir)
+                # Ищем главный: \begin{document}, приоритет — ближе к корню
+                main_tex = None
+                for full_path, _ in all_tex:
+                    try:
+                        with open(full_path, 'r', encoding='utf-8') as fp:
+                            if r'\begin{document}' in fp.read():
+                                main_tex = full_path
+                                break
+                    except:
+                        pass
+                
+                if main_tex is None:
+                    print("⚠️ Не найден \\begin{document}. Используем ближайший к корню .tex файл.")
+                    main_tex = all_tex[0][0]
+                
+                main_tex_name = os.path.relpath(main_tex, tmpdir).replace('\\', '/')
             
             print(f"📄 Главный файл: {main_tex_name}")
             print("🐳 Компиляция ZIP в PDF...")

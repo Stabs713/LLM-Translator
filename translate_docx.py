@@ -1,3 +1,4 @@
+#translate_docx.py
 import re
 import sys
 from docx import Document
@@ -22,8 +23,9 @@ def extract_paragraph_with_math(paragraph):
 
     for child in paragraph._element:
         # Обычный текст (run)
-        if child.tag.endswith('r'):
-            text = child.text or ""
+        if child.tag.endswith('}r') or child.tag == qn('w:r'):
+            t_elem = child.find(qn('w:t'))
+            text = t_elem.text if t_elem is not None else ""
             parts.append(text)
 
         # OMML математика (oMath)

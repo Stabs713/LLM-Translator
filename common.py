@@ -258,7 +258,8 @@ def chunk_text_by_sentences_safe(text, max_tokens=1500):
     current_len = 0
 
     for sent in sentences:
-        tokens = len(sent) // 4
+        # Кириллица кодируется ~2 байта/символ, токен ≈ 3-4 символа → делим на 3
+        tokens = len(sent.encode('utf-8')) // 12
 
         if not current_chunk:
             current_chunk = [sent]
@@ -280,7 +281,7 @@ def chunk_text_by_sentences_safe(text, max_tokens=1500):
 def translate_chunk(text, retries=3):
     """Переводит один чанк текста через OpenRouter"""
 
-    if re.fullmatch(r'[\s\\{}\[\]_^&$__PROTECTED_\d+__]+', text):
+    if re.fullmatch(r'(__PROTECTED_\d+__|\s|[\\{}\[\]_^&$])+', text):
         return text
 
     prompt = f"""Переведи весь английский текст на русский. КРИТИЧЕСКИ ВАЖНО:
