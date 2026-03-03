@@ -51,12 +51,62 @@ def detect_document_class(tex_path):
     return None
 
 
+def fix_bib_file(work_dir: str):
+    """
+    Исправляет типичные ошибки в .bib файлах:
+    - Пробелы в ключах цитирования (напр. @article{Hassani Niaki2023, → HassaniNiaki2023)
+    - Дублирующиеся записи (оставляет только первую)
+    """
+    for fname in os.listdir(work_dir):
+        if not fname.endswith(".bib"):
+            continue
+        bib_path = os.path.join(work_dir, fname)
+        try:
+            with open(bib_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+
+            # 1. Убираем пробелы в ключах: @type{Key With Spaces, → @type{KeyWithSpaces,
+            def fix_key(m):
+                entry_type = m.group(1)
+                key = re.sub(r'\s+', '', m.group(2))
+                return f"@{entry_type}{{{key},"
+            content = re.sub(
+                r'@(\w+)\{([^,{}\n]+),',
+                fix_key,
+                content
+            )
+
+            # 2. Убираем дубликаты — оставляем только первое вхождение каждого ключа
+            seen_keys = set()
+            def remove_duplicate(m):
+                key = re.sub(r'\s+', '', m.group(2))
+                if key.lower() in seen_keys:
+                    return f"% DUPLICATE REMOVED: @{m.group(1)}{{{key},\n"
+                seen_keys.add(key.lower())
+                return m.group(0)
+            content = re.sub(
+                r'@(\w+)\{([^,{}\n]+),',
+                remove_duplicate,
+                content
+            )
+
+            with open(bib_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"  ✓ Исправлен {fname} (пробелы в ключах, дубликаты)")
+        except Exception as e:
+            print(f"  ⚠️ Не удалось исправить {fname}: {e}")
+
+
 def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
     """
     Запускает latexmk внутри Docker.
     Возвращает True, если в work_dir появился PDF, даже если latexmk вернул код 1
     из‑за undefined citations/refs.
+    Флаг -f (force) позволяет завершить xdv→PDF даже при ошибках BibTeX.
     """
+    # Исправляем .bib файлы перед компиляцией
+    fix_bib_file(work_dir)
+
     try:
         result = subprocess.run(
             [
@@ -65,6 +115,7 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
                 "-w", "/work",
                 "texlive/texlive",
                 "latexmk", f"-{compiler}",
+                "-f",                        # БАГ #17: force — завершать PDF даже при ошибках BibTeX
                 "-interaction=nonstopmode",
                 "-file-line-error",
                 "-shell-escape",
@@ -72,7 +123,7 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
             ],
             capture_output=False,
             text=True,
-            timeout=240,
+            timeout=300,                     # увеличен с 240 до 300 с учётом доп. прогонов
         )
     except subprocess.TimeoutExpired:
         print("⚠️ Тайм-аут компиляции (4 мин).")
@@ -84,6 +135,12 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
     pdf_path = os.path.join(work_dir, os.path.splitext(tex_name)[0] + ".pdf")
     if os.path.exists(pdf_path):
         # PDF есть — считаем компиляцию успешной, даже если latexmk вернул 1
+        return True
+
+    # Иногда latexmk кладёт PDF в корень work_dir даже если .tex в поддиректории
+    tex_basename = os.path.splitext(os.path.basename(tex_name))[0]
+    pdf_path_root = os.path.join(work_dir, tex_basename + ".pdf")
+    if os.path.exists(pdf_path_root):
         return True
 
     # PDF нет — это реальная ошибка
@@ -151,6 +208,9 @@ def compile_zip_to_pdf_via_docker(zip_path, main_tex_name):
         print("❌ ZIP-файл не найден.")
         return False
 
+    # Нормализуем разделители пути — Docker (Linux) требует прямых слешей
+    main_tex_name = main_tex_name.replace("\\", "/")
+
     try:
         subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=10)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
@@ -179,7 +239,14 @@ def compile_zip_to_pdf_via_docker(zip_path, main_tex_name):
         if not ok:
             return False
 
-        generated_pdf = os.path.join(tmpdir, os.path.splitext(main_tex_name)[0] + ".pdf")
+        # PDF создаётся рядом с .tex файлом (может быть в поддиректории)
+        tex_basename = os.path.splitext(os.path.basename(main_tex_name))[0]
+        tex_subdir = os.path.dirname(main_tex_name)
+        generated_pdf = os.path.join(tmpdir, tex_subdir, tex_basename + ".pdf") if tex_subdir else os.path.join(tmpdir, tex_basename + ".pdf")
+        # Также проверяем корень (latexmk иногда кладёт PDF туда)
+        generated_pdf_root = os.path.join(tmpdir, tex_basename + ".pdf")
+        if not os.path.exists(generated_pdf) and os.path.exists(generated_pdf_root):
+            generated_pdf = generated_pdf_root
         if os.path.exists(generated_pdf):
             output_pdf = os.path.splitext(zip_path)[0] + ".pdf"
             shutil.copy2(generated_pdf, output_pdf)

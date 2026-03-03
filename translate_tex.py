@@ -27,7 +27,6 @@ EXCLUDE_EXTENSIONS = {
 def should_translate_file(filename):
     """Проверяет, нужно ли переводить файл"""
     basename = os.path.basename(filename).lower()
-    filepath = filename.lower()
     
     if basename in {name.lower() for name in EXCLUDE_FILES}:
         return False
@@ -35,13 +34,6 @@ def should_translate_file(filename):
     _, ext = os.path.splitext(basename)
     if ext.lower() in EXCLUDE_EXTENSIONS:
         return False
-
-    # Пропускаем .tex файлы внутри папок с рисунками
-    FIGURE_DIRS = {'figs', 'figures', 'images', 'img', 'pics', 'graphics'}
-    parts = filepath.replace('\\', '/').split('/')
-    for part in parts[:-1]:  # все части пути кроме имени файла
-        if part in FIGURE_DIRS:
-            return False
     
     return True
 
@@ -75,18 +67,6 @@ def sanitize_tex_file(file_path):
     content = "".join(cleaned_chars)
     if removed_count > 0:
         print(f"  🧹 Удалено {removed_count} недопустимых управляющих символов.")
-
-    # 2. Исправляем поломанный \ProvidesPackage{name'} или \ProvidesPackage{name,}
-    # Это вызывает предупреждение: "You have requested file ','"
-    if file_path.endswith('.sty'):
-        fixed = re.sub(
-            r'(\\ProvidesPackage\{[^}]+?)([,\'\s]+)(\})',
-            r'\1\3',
-            content
-        )
-        if fixed != content:
-            content = fixed
-            print(f"  🔧 Исправлен \\ProvidesPackage в {os.path.basename(file_path)}")
 
     # Записываем обратно, только если были изменения по символам
     if content != original_content:
@@ -154,38 +134,29 @@ def translate_latex_text(latex_content, max_chunk_size=2000):
         postamble = ""
 
     translated_body = translate_body(body, max_chunk_size)
-    translated_preamble = translate_preamble(preamble)
 
-    return translated_preamble + begin_doc + translated_body + postamble
+    return preamble + begin_doc + translated_body + postamble
 
 def translate_preamble(preamble):
-    """Переводит \title{}, \author{} и \date{} в преамбуле"""
+    """Переводит только \title{} в преамбуле, автора оставляет"""
     result = preamble
 
-    def translate_macro_content(macro_name, match):
-        inner = match.group(1)
-        # Защищаем математику внутри
+    def translate_title(match):
+        title_text = match.group(1)
         protected = []
         def protect(m):
             protected.append(m.group(0))
             return f"__P{len(protected)-1}__"
-        inner = re.sub(r'\$[^$]+\$', protect, inner)
+        title_text = re.sub(r'\$[^$]+\$', protect, title_text)
 
-        # \date{} часто содержит \today или числа — не переводим
-        if macro_name == 'date':
-            return match.group(0)
-
-        translated = translate_chunk(inner)
+        translated = translate_chunk(title_text)
 
         for i in range(len(protected)-1, -1, -1):
             translated = translated.replace(f"__P{i}__", protected[i])
 
-        return f"\\{macro_name}{{{translated}}}"
+        return f"\\title{{{translated}}}"
 
-    result = re.sub(r'\\title\{([^}]+)\}',  lambda m: translate_macro_content('title',  m), result)
-    result = re.sub(r'\\author\{([^}]+)\}', lambda m: translate_macro_content('author', m), result)
-    result = re.sub(r'\\date\{([^}]+)\}',   lambda m: translate_macro_content('date',   m), result)
-
+    result = re.sub(r'\\title\{([^}]+)\}', translate_title, result)
     return result
 
 def translate_body(body, max_chunk_size=2000):
@@ -209,22 +180,65 @@ def translate_body(body, max_chunk_size=2000):
     text = re.sub(r'\$[^$]+\$', protect_block, text)
     text = re.sub(r'\\\(.*?\\\)', protect_block, text, flags=re.DOTALL)
 
-    # Технические окружения (не переводим целиком)
+    # Технические окружения (полная защита — структура не переводится)
     for env in ['verbatim', 'lstlisting', 'minted', 'code', 'tikzpicture', 'asy']:
         pattern = rf'\\begin\{{{env}\*?\}}.*?\\end\{{{env}\*?\}}'
         text = re.sub(pattern, protect_block, text, flags=re.DOTALL)
 
-    # Списочные окружения переводим целиком как один чанк, чтобы не разорвать \begin{}/\end{}
-    # Для этого находим их, переводим внутри и защищаем результат
-    def translate_list_env(match):
-        env_content = match.group(0)
-        translated_env = translate_chunk(env_content)
-        protected_blocks.append(translated_env)
+    # description/itemize/enumerate — защищаем целиком, но переводим текст \item заранее
+    def protect_list_env(match):
+        """Переводит текстовое содержимое item-блоков внутри description/itemize/enumerate,
+        затем защищает всё окружение как единый блок."""
+        env_text = match.group(0)
+
+        # Переводим описание в \item[label]{описание} или текст после \item
+        def translate_item_label(m):
+            label = m.group(1)  # содержимое [...] — обычно термин/аббревиатура, не переводим
+            return m.group(0)   # метку оставляем как есть
+
+        def translate_item_body(m):
+            r"""Переводит текстовый абзац после \item или \item[...]"""
+            full = m.group(0)
+            prefix = m.group(1)   # \item или \item[...]
+            body = m.group(2)     # текст до следующего \item или \end
+            if not body.strip():
+                return full
+            # Защищаем вложенную математику внутри body
+            inner_protected = []
+            def protect_inner(im):
+                inner_protected.append(im.group(0))
+                return f"__INNER_{len(inner_protected)-1}__"
+            b = re.sub(r'\$[^$]+\$', protect_inner, body)
+            b = re.sub(r'\\\(.*?\\\)', protect_inner, b, flags=re.DOTALL)
+            b = re.sub(r'\\\[.*?\\\]', protect_inner, b, flags=re.DOTALL)
+            # Защищаем команды
+            b = re.sub(r'(\\cite(?:\[[^\]]*\])?\{[^}]*\})', protect_inner, b)
+            b = re.sub(r'(\\ref\{[^}]*\})', protect_inner, b)
+            b = re.sub(r'(\\label\{[^}]*\})', protect_inner, b)
+            # Если есть что переводить
+            plain = re.sub(r'__INNER_\d+__', '', b).strip()
+            if re.search(r'[a-zA-Z]{3,}', plain):
+                b_translated = translate_chunk(b)
+            else:
+                b_translated = b
+            # Восстанавливаем вложенные защиты
+            for idx, val in enumerate(inner_protected):
+                b_translated = b_translated.replace(f"__INNER_{idx}__", val)
+            return prefix + b_translated
+
+        # Паттерн: \item[...] или \item, затем текст до следующего \item или \end
+        env_text = re.sub(
+            r'(\\item(?:\[[^\]]*\])?)(.*?)(?=\\item|\\end\{)',
+            translate_item_body,
+            env_text,
+            flags=re.DOTALL
+        )
+        protected_blocks.append(env_text)
         return f"__PROTECTED_{len(protected_blocks)-1}__"
 
     for env in ['description', 'itemize', 'enumerate']:
-        pattern = rf'(\\begin\{{{env}\}}.*?\\end\{{{env}\}})'
-        text = re.sub(pattern, translate_list_env, text, flags=re.DOTALL)
+        pattern = rf'\\begin\{{{env}\}}.*?\\end\{{{env}\}}'
+        text = re.sub(pattern, protect_list_env, text, flags=re.DOTALL)
 
     # Защита путей и ссылок
     text = re.sub(r'(\\input\{[^}]*\})', protect_block, text)
@@ -250,7 +264,7 @@ def translate_body(body, max_chunk_size=2000):
             translated_parts.append(para)
             continue
 
-        if re.fullmatch(r'(__PROTECTED_\d+__|\s|[\\{}\[\]_^&$])+', para):
+        if re.fullmatch(r'[\s__PROTECTED_\d+__]+', para):
             translated_parts.append(para)
             continue
 
@@ -295,48 +309,98 @@ def translate_body(body, max_chunk_size=2000):
 
 def restore_bibliography_commands(original_content, translated_content):
     """
-    ЖЕСТКОЕ восстановление команд библиографии.
-    Мы полностью игнорируем то, что написано в translated_content,
-    и берем имена файлов напрямую из original_content.
+    Жёсткое восстановление команд библиографии.
+    Берём имена файлов напрямую из original_content.
     """
     # 1. Восстанавливаем \bibliographystyle{...}
     orig_style = re.search(r'\\bibliographystyle\{([^}]+)\}', original_content)
     if orig_style:
         style_name = orig_style.group(1)
+        # Заменяем только саму команду, не всю строку
         translated_content = re.sub(
             r'\\bibliographystyle\{[^}]*\}',
             f'\\\\bibliographystyle{{{style_name}}}',
-            translated_content,
-            flags=re.IGNORECASE
+            translated_content
         )
-        # Если команда была удалена LLM — восстанавливаем перед \bibliography
+        # Если команда исчезла совсем — вставляем перед \bibliography
         if f'\\bibliographystyle{{{style_name}}}' not in translated_content:
             translated_content = re.sub(
                 r'(\\bibliography\{)',
-                f'\\\\bibliographystyle{{{style_name}}}\n\\1',
-                translated_content,
-                count=1
+                f'\\\\bibliographystyle{{{style_name}}}\\n\\1',
+                translated_content
             )
 
     # 2. Восстанавливаем \bibliography{...}
     orig_bib = re.search(r'\\bibliography\{([^}]+)\}', original_content)
     if orig_bib:
         bib_name = orig_bib.group(1)
+        # Заменяем только саму команду, не всю строку
         translated_content = re.sub(
             r'\\bibliography\{[^}]*\}',
             f'\\\\bibliography{{{bib_name}}}',
-            translated_content,
-            flags=re.IGNORECASE
+            translated_content
         )
+        # Если команда исчезла совсем — вставляем перед \end{document}
         if f'\\bibliography{{{bib_name}}}' not in translated_content:
-            translated_content = re.sub(
-                r'\\?bibliography\{[^}]*\}',
-                f'\\bibliography{{{bib_name}}}',
-                translated_content,
-                flags=re.IGNORECASE
+            translated_content = translated_content.replace(
+                r'\end{document}',
+                f'\\bibliography{{{bib_name}}}\n\\end{{document}}'
             )
 
+    # 3. Восстанавливаем \addbibresource{...} (biblatex)
+    orig_addbibs = re.findall(r'\\addbibresource\{([^}]+)\}', original_content)
+    if orig_addbibs:
+        # Удаляем все существующие \addbibresource в переводе
+        translated_content = re.sub(r'\\addbibresource\{[^}]*\}', '', translated_content)
+        # Восстанавливаем все оригинальные \addbibresource после \documentclass
+        resources = '\n'.join(f'\\addbibresource{{{r}}}' for r in orig_addbibs)
+        translated_content = re.sub(
+            r'(\\documentclass(?:\[[^\]]*\])?\{[^}]+\})',
+            r'\1\n' + resources.replace('\\', '\\\\'),
+            translated_content,
+            count=1
+        )
+
     return translated_content
+def fix_broken_list_envs(content):
+    r"""
+    Исправляет сломанные list-окружения после перевода LLM.
+
+    Реальный паттерн поломки (LLM закрывает окружение немедленно, items болтаются
+    снаружи, оригинальный \end{description} остаётся как сиротский тег):
+
+        \begin{description}
+        \end{description}      <- LLM закрыл сразу (пустое)
+        \item[Термин] Текст    <- items снаружи
+        \item[Термин2] Текст2
+        \end{description}      <- сиротский оригинальный тег
+
+    Исправляем в:
+        \begin{description}
+        \item[Термин] Текст
+        \item[Термин2] Текст2
+        \end{description}
+    """
+    for env in ['description', 'itemize', 'enumerate']:
+        # Паттерн: пустое окружение + items снаружи + сиротский \end{env}
+        pattern = (
+            rf'(\\begin\{{{env}\}})'        # \begin{description}
+            r'\s*'
+            rf'(\\end\{{{env}\}})'          # \end{description}  <- пустое закрытие LLM
+            r'\s*'
+            r'((?:\\item(?:\[[^\]]*\])?'    # один или более \item блоков
+            r'.*?)+?)'
+            r'\s*'
+            rf'(\\end\{{{env}\}})'          # \end{description}  <- сиротский тег
+        )
+        def rebuild(m, env=env):
+            items_block = m.group(3).rstrip()
+            if not items_block.strip():
+                return m.group(0)
+            return f'\\begin{{{env}}}\n{items_block}\n\\end{{{env}}}'
+        content = re.sub(pattern, rebuild, content, flags=re.DOTALL)
+    return content
+
 
 def process_zip_for_translation(zip_path, output_dir):
     """Обрабатывает ZIP-архив с LaTeX файлами"""
@@ -346,54 +410,57 @@ def process_zip_for_translation(zip_path, output_dir):
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(tmp_extract_dir)
 
-        # Собираем все .tex файлы с их глубиной вложенности
-        all_tex_files = []
+        tex_files = []
+        main_tex = None
+        is_mdpi = False
+        
         for root, _, files in os.walk(tmp_extract_dir):
             for f in files:
                 if f.lower().endswith('.tex'):
                     full_path = os.path.join(root, f)
-                    depth = len(os.path.relpath(full_path, tmp_extract_dir).split(os.sep))
-                    all_tex_files.append((full_path, depth))
-
-        if not all_tex_files:
-            raise ValueError("В архиве нет .tex файлов.")
-
-        # Сортируем: сначала файлы ближе к корню
-        all_tex_files.sort(key=lambda x: x[1])
-
-        # Ищем главный файл: содержит \begin{document}, приоритет — ближе к корню
-        main_tex = None
-        is_mdpi = False
-        for full_path, depth in all_tex_files:
-            try:
-                with open(full_path, 'r', encoding='utf-8') as fp:
-                    content = fp.read()
-                    if r'\begin{document}' in content:
-                        main_tex = full_path
-                        if 'mdpi' in content.lower() and r'\documentclass' in content:
-                            is_mdpi = True
-                        break
-            except:
-                pass
-
-        if main_tex is None:
-            # Нет \begin{document} — берём ближайший к корню .tex
-            main_tex = all_tex_files[0][0]
-            print("⚠️ Не найден \\begin{document}. Используем ближайший к корню .tex как главный.")
-
-        # Фильтруем файлы для перевода (только те, что нужно переводить)
-        tex_files = []
-        for full_path, _ in all_tex_files:
-            if not should_translate_file(full_path):
-                print(f"⏭️  Пропуск файла (технический): {os.path.basename(full_path)}")
-                continue
-            tex_files.append(full_path)
+                    
+                    if not should_translate_file(f):
+                        print(f"⏭️  Пропуск файла (технический): {f}")
+                        continue
+                    
+                    tex_files.append(full_path)
+                    if main_tex is None:
+                        try:
+                            with open(full_path, 'r', encoding='utf-8') as fp:
+                                content = fp.read()
+                                if r'\begin{document}' in content:
+                                    main_tex = full_path
+                                    if 'mdpi' in content.lower() and '\\documentclass' in content:
+                                        is_mdpi = True
+                        except:
+                            pass
 
         if not tex_files:
-            print("⚠️  Все .tex файлы были исключены. Переводим только главный.")
-            tex_files = [main_tex]
+            all_tex = []
+            for root, _, files in os.walk(tmp_extract_dir):
+                for f in files:
+                    if f.lower().endswith('.tex'):
+                        all_tex.append(os.path.join(root, f))
+            
+            if not all_tex:
+                raise ValueError("В архиве нет .tex файлов.")
+            else:
+                print("⚠️  Все .tex файлы были исключены (технические файлы).")
+                for tf in all_tex:
+                    try:
+                        with open(tf, 'r', encoding='utf-8') as fp:
+                            if r'\begin{document}' in fp.read():
+                                main_tex = tf
+                                break
+                    except:
+                        pass
+                
+                if not main_tex:
+                    main_tex = all_tex[0]
 
-        print(f"📌 Главный файл: {os.path.relpath(main_tex, tmp_extract_dir)}")
+        if main_tex is None and tex_files:
+            main_tex = tex_files[0]
+            print("⚠️ Не найден \\begin{document}. Используем первый .tex как главный.")
 
         for tex_path in tex_files:
             print(f"\n📄 Перевод файла: {os.path.basename(tex_path)}")
@@ -407,6 +474,10 @@ def process_zip_for_translation(zip_path, output_dir):
             
             # ВОССТАНАВЛИВАЕМ БИБЛИОГРАФИЮ ДО записи файла
             translated = restore_bibliography_commands(original_content, translated)
+            
+            # Исправляем сломанные description/itemize/enumerate окружения
+            # (LLM иногда оставляет \item снаружи окружения или пустые \begin{description}\end{description})
+            translated = fix_broken_list_envs(translated)
 
             # Восстанавливаем \documentclass из оригинала
             docclass_match = re.search(r'\\documentclass(?:\[[^\]]*\])?\{[^\}]+\}', original_content)
@@ -431,12 +502,6 @@ def process_zip_for_translation(zip_path, output_dir):
             # Важно: это делается ПОСЛЕ записи, чтобы убрать мусор, но ДО компиляции
             sanitize_tex_file(tex_path)
 
-        # Санируем .sty файлы (исправляем \ProvidesPackage и управляющие символы)
-        for root, _, files in os.walk(tmp_extract_dir):
-            for f in files:
-                if f.lower().endswith('.sty'):
-                    sanitize_tex_file(os.path.join(root, f))
-
         base_name = os.path.splitext(os.path.basename(zip_path))[0]
         output_zip = os.path.join(output_dir, f"{base_name}_translated.zip")
 
@@ -445,9 +510,11 @@ def process_zip_for_translation(zip_path, output_dir):
                 for file in files:
                     full_path = os.path.join(root, file)
                     arc_path = os.path.relpath(full_path, tmp_extract_dir)
+                    arc_path = arc_path.replace("\\", "/")  # ZIP и Docker требуют прямых слешей
                     new_zip.write(full_path, arc_path)
 
-        main_tex_rel = os.path.relpath(main_tex, tmp_extract_dir).replace('\\', '/')
+        main_tex_rel = os.path.relpath(main_tex, tmp_extract_dir)
+        main_tex_rel = main_tex_rel.replace("\\", "/")  # Docker требует прямых слешей
         return output_zip, main_tex_rel
 
 def add_russian_preamble(latex_content):
@@ -457,9 +524,6 @@ def add_russian_preamble(latex_content):
     """
     if r"\documentclass" not in latex_content:
         return latex_content
-
-    if r"\usepackage{fontspec}" in latex_content:
-        return latex_content  # поддержка уже добавлена, не дублируем
 
     lines = latex_content.splitlines()
     new_lines = []
@@ -476,17 +540,20 @@ def add_russian_preamble(latex_content):
 
     content_clean = "\n".join(new_lines)
 
-    # 2. Определяем, нужен ли режим MDPI (LuaLaTeX)
-    is_mdpi = "mdpi" in content_clean.lower() and r"\documentclass" in content_clean
+    # Классы документов, которые сами загружают babel без опций.
+    # Для них \usepackage[russian, english]{babel} вызовет "option clash".
+    _CLS_WITH_BABEL = {
+        'wlscirep', 'nature', 'elsarticle', 'revtex4', 'revtex4-1', 'revtex4-2',
+        'mnras', 'aa', 'aastex63', 'iopart', 'jmlr2e', 'iccv', 'cvpr', 'acmart',
+        'ieeeconf', 'IEEEtran', 'scrartcl', 'scrbook', 'scrreprt',
+    }
 
-    # Проверяем, загружен ли babel уже в .cls (тогда нельзя делать \usepackage[...]{babel} снова)
-    babel_in_cls = False
-    for line in content_clean.splitlines():
-        stripped = line.strip()
-        # Если в документе остался \usepackage{babel} без опций — значит cls его уже загрузил
-        if re.search(r'\\usepackage\s*\{babel\}', stripped):
-            babel_in_cls = True
-            break
+    # 2. Определяем класс документа и режим компилятора
+    is_mdpi = "mdpi" in content_clean.lower() and r"\documentclass" in content_clean
+    _dcm = re.search(r'\\documentclass(?:\[.*?\])?\{([^}]+)\}', content_clean)
+    _docclass = _dcm.group(1).strip() if _dcm else ""
+    _babel_in_src = bool(re.search(r'\\usepackage\s*(?:\[.*?\])?\s*\{babel\}', content_clean))
+    babel_preloaded = (_docclass in _CLS_WITH_BABEL) or _babel_in_src
 
     # 3. Формируем новый блок поддержки языка
     if is_mdpi:
@@ -501,26 +568,22 @@ def add_russian_preamble(latex_content):
             r"\newfontfamily\cyrillicfonttt{DejaVu Sans Mono}[Script=Cyrillic]",
             r"\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}",
             r"\setmainfont{DejaVu Serif}",
-            r"\usepackage{microtype}",
-            r"\usepackage{float}",
             "% -------------------------------------------------------"
         ]
-    elif babel_in_cls:
-        # babel уже загружен cls — добавляем русский через \babelprovide, без переопределения
+    elif babel_preloaded:
+        # Класс уже загрузил babel — используем \babelprovide чтобы избежать option clash
         russian_support = [
-            "% --- Поддержка русского языка (XeLaTeX, babel уже в cls) ---",
+            "% --- Поддержка русского языка (XeLaTeX/Babel — babelprovide) ---",
             r"\usepackage{fontspec}",
             r"\babelprovide[main, import]{russian}",
             r"\babelprovide[import]{english}",
             r"\setmainfont{DejaVu Serif}",
             r"\setsansfont{DejaVu Sans}",
             r"\setmonofont{DejaVu Sans Mono}",
-            r"\usepackage{microtype}",
-            r"\usepackage{float}",
-            r"\sloppy",
-            "% ------------------------------------------------------------"
+            "% ----------------------------------------------------------------"
         ]
     else:
+        # Обычный случай — загружаем babel с опциями
         russian_support = [
             "% --- Поддержка русского языка (XeLaTeX/Babel) ---",
             r"\usepackage{fontspec}",
@@ -528,9 +591,6 @@ def add_russian_preamble(latex_content):
             r"\setmainfont{DejaVu Serif}",
             r"\setsansfont{DejaVu Sans}",
             r"\setmonofont{DejaVu Sans Mono}",
-            r"\usepackage{microtype}",
-            r"\usepackage{float}",
-            r"\sloppy",
             "% -------------------------------------------------"
         ]
 
