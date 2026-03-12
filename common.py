@@ -52,8 +52,8 @@ TRANSLATABLE_ENVIRONMENTS = {
     'tabular', 'tabularx', 'tabulary', 'longtable',
 }
 
-# Глобальные переменные
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Глобальные переменные и конфигурация API
+OPENROUTER_API_URL = None
 OPENROUTER_API_KEY = None
 CURRENT_MODEL = None
 
@@ -103,9 +103,17 @@ FREE_MODELS = [
 
 
 def load_env_vars():
-    global OPENROUTER_API_KEY
+    """
+    Загружает переменные окружения из .env.
+    Требуется как минимум OPENROUTER_API_KEY.
+    OPENROUTER_API_URL можно переопределить, по умолчанию используется официальный эндпоинт OpenRouter.
+    """
+    global OPENROUTER_API_KEY, OPENROUTER_API_URL
+
     load_dotenv()
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+
     if not OPENROUTER_API_KEY:
         raise ValueError("❌ OPENROUTER_API_KEY не найден в .env. Добавьте его.")
 
@@ -335,6 +343,7 @@ def translate_chunk(text, retries=3):
         if attempt < retries - 1:
             import time
             time.sleep(2)
+    print("⚠️ Не удалось получить перевод от модели, возвращаю исходный текст чанка без изменений.")
     return text
 
 

@@ -107,6 +107,8 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
     # Исправляем .bib файлы перед компиляцией
     fix_bib_file(work_dir)
 
+    log_path = os.path.join(work_dir, "latexmk.log")
+
     try:
         result = subprocess.run(
             [
@@ -121,10 +123,21 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
                 "-shell-escape",
                 tex_name,
             ],
-            capture_output=False,
+            capture_output=True,
             text=True,
             timeout=300,                     # увеличен с 240 до 300 с учётом доп. прогонов
         )
+
+        # Сохраняем stdout/stderr в лог для отладки
+        try:
+            with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
+                if result.stdout:
+                    log_file.write(result.stdout)
+                if result.stderr:
+                    log_file.write("\n\n=== STDERR ===\n\n")
+                    log_file.write(result.stderr)
+        except Exception as e:
+            print(f"⚠️ Не удалось сохранить лог latexmk: {e}")
     except subprocess.TimeoutExpired:
         print("⚠️ Тайм-аут компиляции (4 мин).")
         return False
