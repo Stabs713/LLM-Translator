@@ -10,9 +10,15 @@ from common import (
     load_env_vars,
     get_files_list,
     select_file_by_number,
-    select_translation_model
+    select_translation_model,
+    find_main_tex_in_dir,
 )
-from translate_tex import translate_latex_text, add_russian_preamble, process_zip_for_translation, restore_bibliography_commands
+from translate_tex import (
+    translate_latex_text,
+    add_russian_preamble,
+    process_zip_for_translation,
+    restore_bibliography_commands,
+)
 from translate_docx import translate_docx
 from pdf_converter import compile_tex_to_pdf_via_docker, compile_zip_to_pdf_via_docker
 
@@ -51,44 +57,17 @@ def compile_only_mode():
             # Для ZIP нужно найти главный .tex файл
             import zipfile
             import tempfile
-            
+
             with tempfile.TemporaryDirectory() as tmpdir:
-                with zipfile.ZipFile(input_path, 'r') as zip_ref:
+                with zipfile.ZipFile(input_path, "r") as zip_ref:
                     zip_ref.extractall(tmpdir)
-                
-                # Собираем все .tex файлы с глубиной вложенности
-                all_tex = []
-                for root, _, files in os.walk(tmpdir):
-                    for f in files:
-                        if f.lower().endswith('.tex'):
-                            full_path = os.path.join(root, f)
-                            depth = len(os.path.relpath(full_path, tmpdir).split(os.sep))
-                            all_tex.append((full_path, depth))
-                
-                if not all_tex:
-                    print("❌ В архиве нет .tex файлов.")
+
+                try:
+                    main_tex_name = find_main_tex_in_dir(tmpdir)
+                except ValueError as e:
+                    print(f"❌ {e}")
                     return
-                
-                # Сортируем по глубине — сначала файлы ближе к корню
-                all_tex.sort(key=lambda x: x[1])
-                
-                # Ищем главный: \begin{document}, приоритет — ближе к корню
-                main_tex = None
-                for full_path, _ in all_tex:
-                    try:
-                        with open(full_path, 'r', encoding='utf-8') as fp:
-                            if r'\begin{document}' in fp.read():
-                                main_tex = full_path
-                                break
-                    except:
-                        pass
-                
-                if main_tex is None:
-                    print("⚠️ Не найден \\begin{document}. Используем ближайший к корню .tex файл.")
-                    main_tex = all_tex[0][0]
-                
-                main_tex_name = os.path.relpath(main_tex, tmpdir).replace('\\', '/')
-            
+
             print(f"📄 Главный файл: {main_tex_name}")
             print("🐳 Компиляция ZIP в PDF...")
             compile_zip_to_pdf_via_docker(input_path, main_tex_name)
@@ -102,7 +81,7 @@ def compile_only_mode():
         import traceback
         traceback.print_exc()
 
-def _translate_file(input_path, model_name, auto_compile=False):
+def _translate_file(input_path: str, model_name: str, auto_compile: bool = False) -> None:
     """
     Внутренняя функция перевода одного файла.
     Работает и для интерактивного, и для CLI‑режима.
@@ -167,7 +146,7 @@ def _translate_file(input_path, model_name, auto_compile=False):
         traceback.print_exc()
 
 
-def translate_mode():
+def translate_mode() -> None:
     """Интерактивный режим перевода с компиляцией"""
     print("\n🌐 РЕЖИМ ПЕРЕВОДА")
     print("-" * 70)
@@ -199,7 +178,122 @@ def translate_mode():
 
     _translate_file(input_path, model_name, auto_compile=auto_compile)
 
-def main():
+
+def run_compile_cli(args: argparse.Namespace) -> None:
+    """Обработка CLI‑режима compile."""
+    if not args.file:
+        # Без --file используем интерактивный режим компиляции
+        compile_only_mode()
+        return
+
+    filename = os.path.basename(args.file)
+    input_path = args.file
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in (".tex", ".zip"):
+        print("❌ Для режима compile поддерживаются только .tex и .zip.")
+        sys.exit(1)
+
+    try:
+        if ext == ".tex":
+            print("🐳 Компиляция .tex в PDF...")
+            if not compile_tex_to_pdf_via_docker(input_path):
+                sys.exit(1)
+        else:
+            print("🐳 Компиляция ZIP в PDF...")
+            # Нам нужно знать main_tex_name; используем ту же логику, что и в интерактивном режиме
+            import zipfile
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with zipfile.ZipFile(input_path, "r") as zip_ref:
+                    zip_ref.extractall(tmpdir)
+
+                try:
+                    main_tex_name = find_main_tex_in_dir(tmpdir)
+                except ValueError as e:
+                    print(f"❌ {e}")
+                    sys.exit(1)
+
+            print(f"📄 Главный файл: {main_tex_name}")
+            if not compile_zip_to_pdf_via_docker(input_path, main_tex_name):
+                sys.exit(1)
+    except Exception as e:
+        print(f"\n💥 Ошибка: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def run_translate_cli(args: argparse.Namespace) -> None:
+    """Обработка CLI‑режима translate."""
+    # Выбор модели
+    if args.model:
+        model_name = args.model
+        if not test_model_connection(model_name):
+            print("❌ Не удалось подключиться к модели. Проверьте ключ и URL.")
+            sys.exit(1)
+    else:
+        model_name = select_translation_model()
+        if not test_model_connection(model_name):
+            print("❌ Не удалось подключиться к модели. Проверьте ключ и URL.")
+            sys.exit(1)
+
+    # Выбор файла
+    if args.file:
+        input_path = args.file
+    else:
+        available = get_files_list(INPUT_DIR)
+        if not available:
+            print(f"📁 Положите .docx, .tex или .zip в папку '{INPUT_DIR}'")
+            sys.exit(1)
+
+        print(f"\n📁 Доступные файлы для перевода:")
+        for i, filename in enumerate(available, 1):
+            print(f"  {i}. {filename}")
+
+        file_index = select_file_by_number(len(available))
+        filename = available[file_index - 1]
+        input_path = os.path.join(INPUT_DIR, filename)
+
+    _translate_file(input_path, model_name, auto_compile=args.compile)
+
+
+def run_interactive_menu() -> None:
+    """Интерактивное меню, используемое при отсутствии CLI‑аргументов."""
+    while True:
+        show_main_menu()
+
+        try:
+            choice = input("Выберите режим (1-3): ").strip()
+
+            if choice == '1':
+                translate_mode()
+            elif choice == '2':
+                compile_only_mode()
+            elif choice == '3':
+                print("\n👋 До свидания!")
+                sys.exit(0)
+            else:
+                print("❌ Выберите 1, 2 или 3")
+                continue
+
+            # Спрашиваем, продолжить ли работу
+            again = input("\n🔄 Выполнить ещё одну операцию? (y/n): ").strip().lower()
+            if again != 'y':
+                print("\n👋 До свидания!")
+                break
+
+        except KeyboardInterrupt:
+            print("\n\n❌ Отменено пользователем.")
+            sys.exit(1)
+        except Exception as e:
+            print(f"\n💥 Ошибка: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="LLM-Translator: перевод и компиляция LaTeX/DOCX"
     )
@@ -234,139 +328,15 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Неинтерактивный CLI‑режим
-    if args.mode:
-        if args.mode == "compile":
-            if args.file:
-                # Компиляция указанного файла
-                filename = os.path.basename(args.file)
-                input_path = args.file
-                ext = os.path.splitext(filename)[1].lower()
-                if ext not in (".tex", ".zip"):
-                    print("❌ Для режима compile поддерживаются только .tex и .zip.")
-                    sys.exit(1)
-                # Временно переиспользуем логику compile_only_mode для одного файла
-                # без интерактивного выбора
-                try:
-                    if ext == ".tex":
-                        print("🐳 Компиляция .tex в PDF...")
-                        if not compile_tex_to_pdf_via_docker(input_path):
-                            sys.exit(1)
-                    else:
-                        print("🐳 Компиляция ZIP в PDF...")
-                        # Нам нужно знать main_tex_name; используем ту же логику, что и в интерактивном режиме
-                        import zipfile
-                        import tempfile
-
-                        with tempfile.TemporaryDirectory() as tmpdir:
-                            with zipfile.ZipFile(input_path, "r") as zip_ref:
-                                zip_ref.extractall(tmpdir)
-
-                            all_tex = []
-                            for root, _, files in os.walk(tmpdir):
-                                for f in files:
-                                    if f.lower().endswith(".tex"):
-                                        full_path = os.path.join(root, f)
-                                        depth = len(os.path.relpath(full_path, tmpdir).split(os.sep))
-                                        all_tex.append((full_path, depth))
-
-                            if not all_tex:
-                                print("❌ В архиве нет .tex файлов.")
-                                sys.exit(1)
-
-                            all_tex.sort(key=lambda x: x[1])
-
-                            main_tex = None
-                            for full_path, _ in all_tex:
-                                try:
-                                    with open(full_path, "r", encoding="utf-8") as fp:
-                                        if r"\\begin{document}" in fp.read():
-                                            main_tex = full_path
-                                            break
-                                except Exception:
-                                    pass
-
-                            if main_tex is None:
-                                main_tex = all_tex[0][0]
-
-                            main_tex_name = os.path.relpath(main_tex, tmpdir).replace("\\", "/")
-
-                        print(f"📄 Главный файл: {main_tex_name}")
-                        if not compile_zip_to_pdf_via_docker(input_path, main_tex_name):
-                            sys.exit(1)
-                except Exception as e:
-                    print(f"\n💥 Ошибка: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    sys.exit(1)
-            else:
-                # Без --file используем старый интерактивный режим
-                compile_only_mode()
-            return
-
-        if args.mode == "translate":
-            # Выбор модели
-            if args.model:
-                model_name = args.model
-                if not test_model_connection(model_name):
-                    print("❌ Не удалось подключиться к модели. Проверьте ключ и URL.")
-                    sys.exit(1)
-            else:
-                model_name = select_translation_model()
-                if not test_model_connection(model_name):
-                    print("❌ Не удалось подключиться к модели. Проверьте ключ и URL.")
-                    sys.exit(1)
-
-            # Выбор файла
-            if args.file:
-                input_path = args.file
-            else:
-                available = get_files_list(INPUT_DIR)
-                if not available:
-                    print(f"📁 Положите .docx, .tex или .zip в папку '{INPUT_DIR}'")
-                    sys.exit(1)
-
-                print(f"\n📁 Доступные файлы для перевода:")
-                for i, filename in enumerate(available, 1):
-                    print(f"  {i}. {filename}")
-
-                file_index = select_file_by_number(len(available))
-                filename = available[file_index - 1]
-                input_path = os.path.join(INPUT_DIR, filename)
-
-            _translate_file(input_path, model_name, auto_compile=args.compile)
-            return
+    if args.mode == "compile":
+        run_compile_cli(args)
+        return
+    if args.mode == "translate":
+        run_translate_cli(args)
+        return
 
     # Старый интерактивный режим (без аргументов)
-    while True:
-        show_main_menu()
-
-        try:
-            choice = input("Выберите режим (1-3): ").strip()
-
-            if choice == '1':
-                translate_mode()
-            elif choice == '2':
-                compile_only_mode()
-            elif choice == '3':
-                print("\n👋 До свидания!")
-                sys.exit(0)
-            else:
-                print("❌ Выберите 1, 2 или 3")
-                continue
-
-            # Спрашиваем, продолжить ли работу
-            again = input("\n🔄 Выполнить ещё одну операцию? (y/n): ").strip().lower()
-            if again != 'y':
-                print("\n👋 До свидания!")
-                break
-
-        except KeyboardInterrupt:
-            print("\n\n❌ Отменено пользователем.")
-            sys.exit(1)
-        except Exception as e:
-            print(f"\n💥 Ошибка: {e}")
-            import traceback
-            traceback.print_exc()
+    run_interactive_menu()
 
 if __name__ == "__main__":
     main()

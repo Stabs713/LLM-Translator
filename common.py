@@ -1,9 +1,11 @@
 # common.py
 import os
-import requests
-from tqdm import tqdm
-from dotenv import load_dotenv
 import re
+from typing import List, Optional
+
+import requests
+from dotenv import load_dotenv
+from tqdm import tqdm
 
 # Настройки
 INPUT_DIR = "inputs"
@@ -53,9 +55,9 @@ TRANSLATABLE_ENVIRONMENTS = {
 }
 
 # Глобальные переменные и конфигурация API
-OPENROUTER_API_URL = None
-OPENROUTER_API_KEY = None
-CURRENT_MODEL = None
+OPENROUTER_API_URL: Optional[str] = None
+OPENROUTER_API_KEY: Optional[str] = None
+CURRENT_MODEL: Optional[str] = None
 
 # Рекомендуемые платные модели (дешёвые и качественные для перевода)
 PAID_MODELS = [
@@ -102,7 +104,7 @@ FREE_MODELS = [
 ]
 
 
-def load_env_vars():
+def load_env_vars() -> None:
     """
     Загружает переменные окружения из .env.
     Требуется как минимум OPENROUTER_API_KEY.
@@ -118,38 +120,63 @@ def load_env_vars():
         raise ValueError("❌ OPENROUTER_API_KEY не найден в .env. Добавьте его.")
 
 
-def set_current_model(model_name):
+def set_current_model(model_name: str) -> None:
     global CURRENT_MODEL
     CURRENT_MODEL = model_name
 
 
-def get_current_model():
+def get_current_model() -> Optional[str]:
     return CURRENT_MODEL
 
 
-def test_model_connection(model_name, silent=False):
+def _get_openrouter_headers() -> dict:
+    """Возвращает стандартные заголовки для запросов к OpenRouter."""
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://github.com/llm-translator",
+        "X-Title": "LLM Translator",
+    }
+
+
+def openrouter_request(payload: dict, timeout: int = 120) -> Optional[requests.Response]:
+    """
+    Унифицированный HTTP‑запрос к OpenRouter.
+
+    Возвращает объект Response при успехе или None при ошибке/исключении.
+    """
+    if not OPENROUTER_API_KEY or not OPENROUTER_API_URL:
+        return None
+
+    try:
+        response = requests.post(
+            OPENROUTER_API_URL,
+            json=payload,
+            headers=_get_openrouter_headers(),
+            timeout=timeout,
+        )
+        return response
+    except Exception:
+        return None
+
+
+def test_model_connection(model_name: str, silent: bool = False) -> bool:
     """Проверяет подключение к модели"""
     if not silent:
         print(f"🔌 Проверка модели: {model_name}...", end=" ")
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/llm-translator",
-        "X-Title": "LLM Translator"
-    }
     payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": "test"}],
         "max_tokens": 10
     }
     try:
-        response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=15)
-        if response.status_code == 200:
+        response = openrouter_request(payload, timeout=15)
+        if response and response.status_code == 200:
             if not silent:
                 print("✅")
             return True
-        else:
+        elif response is not None:
             if not silent:
                 print(f"❌ (HTTP {response.status_code})")
             return False
@@ -159,7 +186,7 @@ def test_model_connection(model_name, silent=False):
         return False
 
 
-def auto_select_free_model():
+def auto_select_free_model() -> Optional[str]:
     """Автоматически находит первую доступную бесплатную модель"""
     print("\n🔍 Автоматический поиск бесплатных моделей...")
     print("-" * 70)
@@ -172,7 +199,7 @@ def auto_select_free_model():
     return None
 
 
-def select_translation_model():
+def select_translation_model() -> str:
     """Интерактивный выбор модели с возможностью автоперебора"""
     print("\n" + "="*70)
     print("🤖 ВЫБОР МОДЕЛИ ДЛЯ ПЕРЕВОДА")
@@ -252,7 +279,7 @@ def select_translation_model():
     raise Exception("❌ Не удалось выбрать модель для перевода.")
 
 
-def chunk_text_by_sentences_safe(text, max_tokens=1500):
+def chunk_text_by_sentences_safe(text: str, max_tokens: int = 1500) -> List[str]:
     """Разбивает текст на чанки по предложениям"""
     if not text.strip():
         return [text]
@@ -286,7 +313,7 @@ def chunk_text_by_sentences_safe(text, max_tokens=1500):
     return chunks
 
 
-def translate_chunk(text, retries=3):
+def translate_chunk(text: str, retries: int = 3) -> str:
     """Переводит один чанк текста через OpenRouter"""
 
     if re.fullmatch(r'(__PROTECTED_\d+__|\s|[\\{}\[\]_^&$])+', text):
@@ -309,13 +336,6 @@ def translate_chunk(text, retries=3):
 
 Переведённый текст:"""
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/llm-translator",
-        "X-Title": "LLM Translator"
-    }
-
     payload = {
         "model": get_current_model(),
         "messages": [{"role": "user", "content": prompt}],
@@ -326,16 +346,16 @@ def translate_chunk(text, retries=3):
 
     for attempt in range(retries):
         try:
-            response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=120)
-            if response.status_code == 200:
+            response = openrouter_request(payload, timeout=120)
+            if response and response.status_code == 200:
                 result = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                 if result:
                     return result
-            elif response.status_code == 429:
+            elif response is not None and response.status_code == 429:
                 print(f"⚠️ Rate limit (попытка {attempt+1}/{retries})")
                 import time
                 time.sleep(3)
-            else:
+            elif response is not None:
                 print(f"⚠️ HTTP {response.status_code} (попытка {attempt+1}/{retries})")
         except Exception as e:
             print(f"⚠️ Ошибка: {str(e)[:50]} (попытка {attempt+1}/{retries})")
@@ -345,6 +365,50 @@ def translate_chunk(text, retries=3):
             time.sleep(2)
     print("⚠️ Не удалось получить перевод от модели, возвращаю исходный текст чанка без изменений.")
     return text
+
+
+def find_main_tex_in_dir(root_dir: str) -> str:
+    """
+    Находит главный .tex файл в распакованном проекте.
+
+    Логика:
+    - собираем все .tex файлы с информацией о глубине вложенности;
+    - сортируем так, чтобы сначала шли файлы ближе к корню;
+    - среди них ищем первый, где встречается '\\begin{document}';
+      если не нашли — берём самый "поверхностный" .tex.
+
+    Возвращает путь к .tex относительно root_dir с прямыми слешами.
+    Бросает ValueError, если .tex файлов нет.
+    """
+    all_tex = []
+    for root, _, files in os.walk(root_dir):
+        for fname in files:
+            if not fname.lower().endswith(".tex"):
+                continue
+            full_path = os.path.join(root, fname)
+            depth = len(os.path.relpath(full_path, root_dir).split(os.sep))
+            all_tex.append((full_path, depth))
+
+    if not all_tex:
+        raise ValueError("В архиве нет .tex файлов.")
+
+    all_tex.sort(key=lambda x: x[1])
+
+    main_tex_path = None
+    for full_path, _ in all_tex:
+        try:
+            with open(full_path, "r", encoding="utf-8") as fp:
+                if r"\begin{document}" in fp.read():
+                    main_tex_path = full_path
+                    break
+        except Exception:
+            continue
+
+    if main_tex_path is None:
+        main_tex_path = all_tex[0][0]
+
+    rel_path = os.path.relpath(main_tex_path, root_dir).replace(os.sep, "/")
+    return rel_path
 
 
 def get_files_list(directory):

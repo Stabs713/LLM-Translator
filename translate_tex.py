@@ -259,7 +259,9 @@ def translate_body(body, max_chunk_size=2000):
         for i in range(len(protected_blocks)):
             temp = temp.replace(f"__PROTECTED_{i}__", "")
 
-        if not re.search(r'[a-zA-Z]{2,}', temp):
+        # Если после удаления защищённых блоков нет ни латиницы, ни кириллицы,
+        # считаем, что перевод не требуется.
+        if not re.search(r'[A-Za-zА-Яа-я]{2,}', temp):
             translated_parts.append(para)
             continue
 
@@ -305,21 +307,31 @@ def restore_bibliography_commands(original_content, translated_content):
     if orig_style:
         style_name = orig_style.group(1)
         # Полностью заменяем любую строку, содержащую bibliographystyle, на новую
-        # Используем multiline флаг, чтобы захватить команду, даже если она одна в строке
         translated_content = re.sub(
             r'^.*bibliographystyle.*$',
             f'\\bibliographystyle{{{style_name}}}',
             translated_content,
-            flags=re.MULTILINE | re.IGNORECASE
+            flags=re.MULTILINE | re.IGNORECASE,
         )
         # Если команда была не одна в строке (редко), пробуем еще раз более локально
         if f'\\bibliographystyle{{{style_name}}}' not in translated_content:
-             translated_content = re.sub(
+            translated_content = re.sub(
                 r'\\?bibliographystyle\{[^}]*\}',
                 f'\\bibliographystyle{{{style_name}}}',
                 translated_content,
-                flags=re.IGNORECASE
+                flags=re.IGNORECASE,
             )
+        # Если и после этого команды нет (LLM всё убил) — жёстко добавляем перед \bibliography
+        if f'\\bibliographystyle{{{style_name}}}' not in translated_content:
+            if '\\bibliography{' in translated_content:
+                translated_content = re.sub(
+                    r'(\\bibliography\{[^}]+\})',
+                    f'\\\\bibliographystyle{{{style_name}}}\n\\1',
+                    translated_content,
+                    count=1,
+                ).replace('\\\\bibliographystyle', '\\bibliographystyle')
+            else:
+                translated_content += f'\n\\bibliographystyle{{{style_name}}}\n'
 
     # 2. Восстанавливаем \bibliography{...}
     orig_bib = re.search(r'\\bibliography\{([^}]+)\}', original_content)
@@ -340,6 +352,16 @@ def restore_bibliography_commands(original_content, translated_content):
                 translated_content,
                 flags=re.IGNORECASE
             )
+
+        # Если команда так и не появилась — добавляем перед \end{document}
+        if f'\\bibliography{{{bib_name}}}' not in translated_content:
+            if '\\end{document}' in translated_content:
+                translated_content = translated_content.replace(
+                    '\\end{document}',
+                    f'\\bibliography{{{bib_name}}}\n\\end{document}',
+                )
+            else:
+                translated_content += f'\n\\bibliography{{{bib_name}}}\n'
 
     return translated_content
 

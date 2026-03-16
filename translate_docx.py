@@ -87,8 +87,14 @@ def rebuild_paragraph_with_math(paragraph, translated_text, math_elements):
                 paragraph.add_run(part)
 
 
-def translate_docx(input_path, output_path):
-    """Переводит DOCX файл с сохранением OMML формул"""
+def translate_docx(input_path, output_path, skip_references: bool = True):
+    """Переводит DOCX файл с сохранением OMML формул.
+
+    :param input_path: путь к исходному .docx
+    :param output_path: путь к результирующему .docx
+    :param skip_references: если True, раздел литературы после заголовка
+        из REFERENCE_TITLES не переводится.
+    """
     try:
         doc = Document(input_path)
     except Exception as e:
@@ -102,12 +108,13 @@ def translate_docx(input_path, output_path):
             continue
 
         para_text_clean = para.text.strip().lower()
-        if para_text_clean in REFERENCE_TITLES:
-            in_references = True
-            continue
+        if skip_references:
+            if para_text_clean in REFERENCE_TITLES:
+                in_references = True
+                continue
 
-        if in_references:
-            continue
+            if in_references:
+                continue
 
         # Извлекаем текст с placeholder'ами для OMML математики
         full_text, math_elements = extract_paragraph_with_math(para)

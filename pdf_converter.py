@@ -110,6 +110,7 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
     log_path = os.path.join(work_dir, "latexmk.log")
 
     try:
+        print("⏳ Компиляция LaTeX внутри Docker может занять несколько минут...")
         result = subprocess.run(
             [
                 "docker", "run", "--rm",
@@ -125,7 +126,7 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=300,                     # увеличен с 240 до 300 с учётом доп. прогонов
+            timeout=900,                     # увеличен до 15 минут для тяжёлых проектов
         )
 
         # Сохраняем stdout/stderr в лог для отладки
@@ -139,7 +140,7 @@ def _run_latexmk_in_docker(work_dir: str, tex_name: str, compiler: str) -> bool:
         except Exception as e:
             print(f"⚠️ Не удалось сохранить лог latexmk: {e}")
     except subprocess.TimeoutExpired:
-        print("⚠️ Тайм-аут компиляции (4 мин).")
+        print("⚠️ Тайм-аут компиляции (15 мин). См. лог latexmk.log в рабочей директории Docker.")
         return False
     except Exception as e:
         print(f"💥 Ошибка запуска Docker: {e}")
@@ -201,6 +202,17 @@ def compile_tex_to_pdf_via_docker(tex_path):
             patch_mdpi_for_lualatex(tmpdir)
 
         ok = _run_latexmk_in_docker(tmpdir, tex_filename, compiler)
+
+        # Всегда сохраняем лог latexmk рядом с исходным .tex для отладки
+        tmp_log = os.path.join(tmpdir, "latexmk.log")
+        if os.path.exists(tmp_log):
+            try:
+                dest_log = os.path.join(tex_dir, "latexmk.log")
+                shutil.copy2(tmp_log, dest_log)
+                print(f"ℹ️ Лог latexmk сохранён: {dest_log}")
+            except Exception as e:
+                print(f"⚠️ Не удалось сохранить лог latexmk рядом с проектом: {e}")
+
         if not ok:
             return False
 
@@ -249,13 +261,28 @@ def compile_zip_to_pdf_via_docker(zip_path, main_tex_name):
             print("🐳 Компиляция PDF через Docker (XeLaTeX)...")
 
         ok = _run_latexmk_in_docker(tmpdir, main_tex_name, compiler)
+
+        # Всегда сохраняем лог latexmk рядом с исходным ZIP
+        tmp_log = os.path.join(tmpdir, "latexmk.log")
+        if os.path.exists(tmp_log):
+            try:
+                dest_log = os.path.splitext(zip_path)[0] + ".latexmk.log"
+                shutil.copy2(tmp_log, dest_log)
+                print(f"ℹ️ Лог latexmk сохранён: {dest_log}")
+            except Exception as e:
+                print(f"⚠️ Не удалось сохранить лог latexmk рядом с ZIP: {e}")
+
         if not ok:
             return False
 
         # PDF создаётся рядом с .tex файлом (может быть в поддиректории)
         tex_basename = os.path.splitext(os.path.basename(main_tex_name))[0]
         tex_subdir = os.path.dirname(main_tex_name)
-        generated_pdf = os.path.join(tmpdir, tex_subdir, tex_basename + ".pdf") if tex_subdir else os.path.join(tmpdir, tex_basename + ".pdf")
+        generated_pdf = (
+            os.path.join(tmpdir, tex_subdir, tex_basename + ".pdf")
+            if tex_subdir
+            else os.path.join(tmpdir, tex_basename + ".pdf")
+        )
         # Также проверяем корень (latexmk иногда кладёт PDF туда)
         generated_pdf_root = os.path.join(tmpdir, tex_basename + ".pdf")
         if not os.path.exists(generated_pdf) and os.path.exists(generated_pdf_root):
